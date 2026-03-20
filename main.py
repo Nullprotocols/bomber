@@ -3,9 +3,12 @@ import asyncio
 import json
 import shutil
 import sqlite3
-import requests
+import logging
+import tempfile
 from datetime import datetime, timedelta
 from typing import Dict
+import aiohttp
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ConversationHandler,
@@ -14,29 +17,21 @@ from telegram.ext import (
 
 import database as db
 
-# ========== CONFIGURATION (All in one place) ==========
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
-OWNER_ID = 8104850843
-LOG_CHANNEL_ID = -10036720099488  # private log channel
+# ========== LOGGING ==========
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Forced channels
-FORCED_CHANNELS = [
-    {"name": "All Data Here", "link": "https://t.me/all_data_here", "id": -1003090922367},
-    {"name": "OSINT Lookup", "link": "https://t.me/osint_lookup", "id": -1003698567122},
-    {"name": "LEGEND CHATS", "link": "https://t.me/legend_chats_osint", "id": -1003672015073},
-]
-
-# Fake APIs (kept together)
-START_API = "https://bomber.kingcc.qzz.io/bomb"
-SINGLE_API = "https://bomm.gauravcyber0.workers.dev/"
-STOP_API = "https://bomber.kingcc.qzz.io/stop"
-API_KEY = "urfaaan_omdivine"
-
-# Bombing settings
-INTERVAL_SECONDS = 30
-MAX_DURATION_SECONDS = 24 * 3600
-
-# Branding
+# ========== CONFIGURATION (from environment) ==========
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+OWNER_ID = int(os.environ.get("OWNER_ID", "8104850843"))
+LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "-10036720099488"))
+FORCED_CHANNELS = json.loads(os.environ.get("FORCED_CHANNELS", "[]"))
+START_API = os.environ.get("START_API", "https://bomber.kingcc.qzz.io/bomb")
+SINGLE_API = os.environ.get("SINGLE_API", "https://bomm.gauravcyber0.workers.dev/")
+STOP_API = os.environ.get("STOP_API", "https://bomber.kingcc.qzz.io/stop")
+API_KEY = os.environ.get("API_KEY", "urfaaan_omdivine")
+INTERVAL_SECONDS = int(os.environ.get("INTERVAL_SECONDS", "30"))
+MAX_DURATION_SECONDS = int(os.environ.get("MAX_DURATION_SECONDS", "86400"))
 BRANDING = "\n\n⚡ Powered by NULL PROTOCOL"
 
 # Conversation states
@@ -48,6 +43,8 @@ active_bombs: Dict[int, asyncio.Task] = {}
 
 # ========== HELPER FUNCTIONS ==========
 def format_json_human(data):
+    if not data:
+        return "No data"
     if "error" in data:
         return f"❌ Error: {data['error']}"
     text = ""
@@ -80,34 +77,34 @@ def format_json_human(data):
     return text.strip() or "No data"
 
 async def call_start_api(phone):
-    try:
+    async with aiohttp.ClientSession() as session:
         url = f"{START_API}?key={API_KEY}&numbar={phone}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            return resp.json()
-        return {"error": f"HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"error": str(e)}
+        try:
+            async with session.get(url, timeout=10) as resp:
+                return await resp.json()
+        except Exception as e:
+            logger.exception("start_api error")
+            return {"error": str(e)}
 
 async def call_single_api(phone):
-    try:
+    async with aiohttp.ClientSession() as session:
         url = f"{SINGLE_API}?phone={phone}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            return resp.json()
-        return {"error": f"HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"error": str(e)}
+        try:
+            async with session.get(url, timeout=10) as resp:
+                return await resp.json()
+        except Exception as e:
+            logger.exception("single_api error")
+            return {"error": str(e)}
 
 async def call_stop_api(phone):
-    try:
+    async with aiohttp.ClientSession() as session:
         url = f"{STOP_API}?key={API_KEY}&numbar={phone}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            return resp.json()
-        return {"error": f"HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"error": str(e)}
+        try:
+            async with session.get(url, timeout=10) as resp:
+                return await resp.json()
+        except Exception as e:
+            logger.exception("stop_api error")
+            return {"error": str(e)}
 
 async def check_force_join(user_id, context):
     for channel in FORCED_CHANNELS:
@@ -115,7 +112,8 @@ async def check_force_join(user_id, context):
             member = await context.bot.get_chat_member(channel["id"], user_id)
             if member.status in ["left", "kicked"]:
                 return False
-        except Exception:
+        except Exception as e:
+            logger.exception(f"Force join check failed for channel {channel['id']}")
             return False
     return True
 
@@ -249,11 +247,14 @@ async def start_bombing(update, context, query=None):
     phone = context.user_data["phone"]
     duration_sec = context.user_data["duration_seconds"]
     if LOG_CHANNEL_ID:
-        await context.bot.send_message(
-            LOG_CHANNEL_ID,
-            f"🔔 *New Bombing Request*\nUser: {user_id}\nTarget: +91{phone}\nDuration: {duration_sec} seconds\nTime: {datetime.now().isoformat()}",
-            parse_mode="Markdown"
-        )
+        try:
+            await context.bot.send_message(
+                LOG_CHANNEL_ID,
+                f"🔔 *New Bombing Request*\nUser: {user_id}\nTarget: +91{phone}\nDuration: {duration_sec} seconds\nTime: {datetime.now().isoformat()}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.exception("Failed to send log")
     start_result = await call_start_api(phone)
     start_text = format_json_human(start_result)
     msg = f"🔥 *Bombing Started!*\n\n{start_text}\n\nWill run for {duration_sec} seconds.\nUse /stop to cancel." + BRANDING
@@ -275,7 +276,10 @@ async def bombing_loop(user_id, phone, duration_sec, context):
                 break
             result = await call_single_api(phone)
             text = f"📡 *Cycle #{iteration}*\n\n{format_json_human(result)}" + BRANDING
-            await context.bot.send_message(user_id, text, parse_mode="Markdown")
+            try:
+                await context.bot.send_message(user_id, text, parse_mode="Markdown")
+            except Exception as e:
+                logger.exception("Failed to send bombing update")
         stop_result = await call_stop_api(phone)
         await context.bot.send_message(
             user_id,
@@ -289,6 +293,9 @@ async def bombing_loop(user_id, phone, duration_sec, context):
             f"🛑 *Bombing Stopped by user*\n\n{format_json_human(stop_result)}" + BRANDING,
             parse_mode="Markdown"
         )
+    except Exception as e:
+        logger.exception("Unexpected error in bombing loop")
+        await context.bot.send_message(user_id, f"❌ An error occurred: {e}")
     finally:
         if user_id in active_bombs:
             del active_bombs[user_id]
@@ -338,14 +345,16 @@ async def admin_action(update, context):
 
     if data == "admin_backup":
         await query.answer("Creating backup...")
-        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         try:
-            shutil.copy2(db.DB_FILE, backup_name)
-            with open(backup_name, 'rb') as f:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+                shutil.copy2(db.DB_FILE, tmp.name)
+                tmp_path = tmp.name
+            with open(tmp_path, 'rb') as f:
                 await context.bot.send_document(update.effective_chat.id, f, caption="📀 Database backup")
-            os.remove(backup_name)
+            os.unlink(tmp_path)
             await query.edit_message_text("Backup sent. Returning to admin panel.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="admin_panel")]]))
         except Exception as e:
+            logger.exception("Backup failed")
             await query.edit_message_text(f"Backup failed: {e}")
         return
 
@@ -393,11 +402,7 @@ async def admin_get_user_id(update, context):
         await admin_panel_after_action(update, context)
         return ConversationHandler.END
     elif action == "admin_delete":
-        conn = sqlite3.connect(db.DB_FILE)
-        c = conn.cursor()
-        c.execute("DELETE FROM users WHERE user_id = ?", (target_id,))
-        conn.commit()
-        conn.close()
+        db.delete_user(target_id)
         await update.message.reply_text(f"Deleted user {target_id} from database.")
         await admin_panel_after_action(update, context)
         return ConversationHandler.END
@@ -429,6 +434,7 @@ async def admin_get_dm_message(update, context):
             await context.bot.send_message(target, update.message.text)
         await update.message.reply_text(f"DM sent to {target}.")
     except Exception as e:
+        logger.exception("DM failed")
         await update.message.reply_text(f"Failed to send DM: {e}")
     await admin_panel_after_action(update, context)
     return ConversationHandler.END
@@ -445,11 +451,12 @@ async def admin_broadcast_message(update, context):
                 else:
                     await context.bot.send_message(uid, msg.text)
                 sent += 1
-                await asyncio.sleep(0.05)
-            except:
-                pass
+                await asyncio.sleep(0.2)  # Rate limit protection
+            except Exception as e:
+                logger.warning(f"Broadcast failed to {uid}: {e}")
         await update.message.reply_text(f"Broadcast sent to {sent}/{len(users)} users.")
     except Exception as e:
+        logger.exception("Broadcast error")
         await update.message.reply_text(f"Broadcast failed: {e}")
     await admin_panel_after_action(update, context)
     return ConversationHandler.END
@@ -466,11 +473,12 @@ async def admin_bulkdm_message(update, context):
                 else:
                     await context.bot.send_message(uid, msg.text)
                 sent += 1
-                await asyncio.sleep(0.05)
-            except:
+                await asyncio.sleep(0.2)
+            except Exception:
                 pass
         await update.message.reply_text(f"Bulk DM sent to {sent}/{len(users)} users.")
     except Exception as e:
+        logger.exception("Bulk DM error")
         await update.message.reply_text(f"Bulk DM failed: {e}")
     await admin_panel_after_action(update, context)
     return ConversationHandler.END
@@ -513,16 +521,21 @@ async def callback_handler(update, context):
         await admin_panel(update, context)
         return
 
+# ========== HEALTH CHECK (for uptime robot) ==========
+async def ping(update, context):
+    await update.message.reply_text("ok")
+
 # ========== SCHEDULED BACKUP ==========
 async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
-    """Send daily backup to owner."""
     try:
-        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        shutil.copy2(db.DB_FILE, backup_name)
-        with open(backup_name, 'rb') as f:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+            shutil.copy2(db.DB_FILE, tmp.name)
+            tmp_path = tmp.name
+        with open(tmp_path, 'rb') as f:
             await context.bot.send_document(OWNER_ID, f, caption=f"📀 Daily backup {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        os.remove(backup_name)
+        os.unlink(tmp_path)
     except Exception as e:
+        logger.exception("Scheduled backup failed")
         await context.bot.send_message(OWNER_ID, f"Daily backup failed: {e}")
 
 # ========== MAIN ==========
@@ -562,18 +575,19 @@ def main():
     # Regular commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
+    app.add_handler(CommandHandler("ping", ping))  # health check
 
     # General callback handler
     app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!admin_|bomber$|dur_|cancel$).*"))
 
-    # Scheduled backup every day at 00:00 UTC (if job queue is available)
+    # Scheduled backup daily at 00:00 UTC
     if app.job_queue:
-        app.job_queue.run_daily(scheduled_backup, time=datetime.strptime("00:00", "%H:%M").time())
-        print("Scheduled backup enabled (daily at 00:00 UTC).")
+        app.job_queue.run_daily(scheduled_backup, time=datetime.strptime("00:00", "%H:%M").time(), days=1)
+        logger.info("Scheduled backup enabled (daily at 00:00 UTC).")
     else:
-        print("Warning: JobQueue not available. Scheduled backup disabled.")
+        logger.warning("JobQueue not available. Scheduled backup disabled.")
 
-    print("Bot started...")
+    logger.info("Bot started...")
     app.run_polling()
 
 if __name__ == "__main__":
