@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import requests
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ConversationHandler,
@@ -17,38 +17,32 @@ import database as db
 # ========== CONFIGURATION ==========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 OWNER_ID = 8104850843
-LOG_CHANNEL_ID = -10036720099488  # private log channel
+LOG_CHANNEL_ID = -10036720099488
 
-# Forced channels
 FORCED_CHANNELS = [
     {"name": "All Data Here", "link": "https://t.me/all_data_here", "id": -1003090922367},
     {"name": "OSINT Lookup", "link": "https://t.me/osint_lookup", "id": -1003698567122},
     {"name": "LEGEND CHATS", "link": "https://t.me/legend_chats_osint", "id": -1003672015073},
 ]
 
-# Fake APIs
 START_API = "https://bomber.kingcc.qzz.io/bomb"
 SINGLE_API = "https://bomm.gauravcyber0.workers.dev/"
 STOP_API = "https://bomber.kingcc.qzz.io/stop"
 API_KEY = "urfaaan_omdivine"
 
-# Bombing settings
 INTERVAL_SECONDS = 30
 MAX_DURATION_SECONDS = 24 * 3600
 FREE_DAILY_LIMIT = 3
 REFERRAL_BONUS_CYCLES = 5
 
-# Branding
 BRANDING = "\n\n⚡ Powered by NULL PROTOCOL"
 
 # Conversation states
 PHONE, DURATION = range(2)
 ADMIN_BAN, ADMIN_UNBAN, ADMIN_DELETE, ADMIN_DM_USER, ADMIN_DM_MSG, ADMIN_BROADCAST, ADMIN_BULKDM = range(7)
-# New states for pro features
-SCHEDULE_DATE, SCHEDULE_TIME, REFERRAL_CODE, PREMIUM_DAYS, ADMIN_PREMIUM_USER, ADMIN_PREMIUM_DAYS = range(7, 13)
-REFERRAL_JOIN, PREMIUM_GRANT, PREMIUM_REVOKE = range(13, 16)
+SCHEDULE_STATE = 7
+ADMIN_PREMIUM_USER, ADMIN_PREMIUM_DAYS = 8, 9
 
-# Active bombing sessions
 active_bombs: Dict[int, asyncio.Task] = {}
 
 # ========== HELPER FUNCTIONS ==========
@@ -143,7 +137,6 @@ async def start(update, context):
         await send_force_join_message(update, context)
         return
 
-    # Check if user has premium record; if not, create one (with referral code)
     if db.get_referral_code(user.id) is None:
         db.create_premium(user.id, days=0, referral_code=db.generate_referral_code(user.id))
 
@@ -171,7 +164,7 @@ async def show_main_menu(update, context, edit=False):
     else:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-# ---------- Profile ----------
+# ---------- Profile & Referrals ----------
 async def profile(update, context):
     query = update.callback_query
     await query.answer()
@@ -183,7 +176,7 @@ async def profile(update, context):
     ref_code = db.get_referral_code(user_id)
 
     if premium:
-        premium_status = f"✅ Active until {expiry.strftime('%Y-%m-%d')}" if expiry else "✅ Active (lifetime?)"
+        premium_status = f"✅ Active until {expiry.strftime('%Y-%m-%d')}" if expiry else "✅ Active"
     else:
         premium_status = "❌ Not active"
 
@@ -200,7 +193,6 @@ async def profile(update, context):
 
     await query.edit_message_text(text, parse_mode="Markdown")
 
-# ---------- Referral System ----------
 async def referrals(update, context):
     query = update.callback_query
     await query.answer()
@@ -210,7 +202,7 @@ async def referrals(update, context):
 
     text = (
         f"👥 *Referral Program*\n\n"
-        f"Share your referral link with friends. For each friend who joins and uses the bot, you get **{REFERRAL_BONUS_CYCLES} extra bombing cycles** (applied automatically to your next bomb).\n\n"
+        f"Share your referral link with friends. For each friend who joins, you get **{REFERRAL_BONUS_CYCLES} extra bombing cycles**.\n\n"
         f"🔗 Your link:\n"
         f"`https://t.me/{(await context.bot.get_me()).username}?start=ref_{ref_code}`\n\n"
         f"✅ Referrals: {ref_count}\n"
@@ -220,10 +212,8 @@ async def referrals(update, context):
     await query.edit_message_text(text, parse_mode="Markdown")
 
 async def handle_referral(update, context):
-    # Called when user starts with /start ref_<code>
     if context.args and context.args[0].startswith("ref_"):
         ref_code = context.args[0][4:]
-        # Find user with that referral code
         conn = sqlite3.connect(db.DB_FILE)
         c = conn.cursor()
         c.execute("SELECT user_id FROM premium WHERE referral_code = ?", (ref_code,))
@@ -241,7 +231,6 @@ async def handle_referral(update, context):
                 await update.message.reply_text("You cannot refer yourself.")
         else:
             await update.message.reply_text("Invalid referral code.")
-    # Continue with normal start
     await start(update, context)
 
 # ---------- Premium Plans ----------
@@ -259,8 +248,7 @@ async def premium_plans(update, context):
         "💎 *Premium Plans*\n\n"
         "• Unlimited bombing (no daily limit)\n"
         "• Longer durations (up to 24h)\n"
-        "• Priority support\n"
-        "• More features coming soon\n\n"
+        "• Priority support\n\n"
         "Select a plan to get payment details:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -270,24 +258,15 @@ async def handle_premium_selection(update, context):
     query = update.callback_query
     data = query.data
     if data == "premium_1m":
-        plan = "1 Month"
-        days = 30
-        price = 99
+        plan, days, price = "1 Month", 30, 99
     elif data == "premium_3m":
-        plan = "3 Months"
-        days = 90
-        price = 249
+        plan, days, price = "3 Months", 90, 249
     elif data == "premium_6m":
-        plan = "6 Months"
-        days = 180
-        price = 449
+        plan, days, price = "6 Months", 180, 449
     elif data == "premium_12m":
-        plan = "1 Year"
-        days = 365
-        price = 799
+        plan, days, price = "1 Year", 365, 799
     else:
         return
-    # Store plan details in context.user_data for later confirmation
     context.user_data["premium_plan"] = (plan, days, price)
     await query.edit_message_text(
         f"💰 *Plan Selected: {plan}*\n"
@@ -296,22 +275,20 @@ async def handle_premium_selection(update, context):
         f"`your-upi@okhdfcbank`\n\n"
         f"After payment, send the transaction ID using /confirm_payment <txn_id>.\n"
         f"We'll verify and activate your premium within 24 hours.\n\n"
-        f"*Note:* This is a simulation for demo. In real bot, integrate with payment gateway.",
+        f"*Note:* This is a simulation for demo.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="premium_plans")]])
     )
 
 async def confirm_payment(update, context):
-    # Simple manual confirmation; admin will verify and grant premium
     if not context.args:
         await update.message.reply_text("Usage: /confirm_payment <transaction_id>")
         return
     txn_id = context.args[0]
-    # Notify admin
     await context.bot.send_message(OWNER_ID, f"💰 Payment confirmation from {update.effective_user.id}:\nTXID: {txn_id}")
     await update.message.reply_text("Payment recorded. Admin will verify and activate premium soon.")
 
-# ---------- BOMBER (with referral bonus & cooldown) ----------
+# ---------- BOMBER (with referral bonus) ----------
 async def bomber_start(update, context):
     query = update.callback_query
     await query.answer()
@@ -323,13 +300,11 @@ async def bomber_start(update, context):
         await query.edit_message_text("⚠️ You already have an active bombing session. Use /stop first.")
         return
 
-    # Cooldown check
     premium = db.is_premium(user_id)
     if not db.can_start_bomb(user_id, premium):
         await query.edit_message_text(
             f"❌ You have reached your daily limit ({FREE_DAILY_LIMIT} bombs) for free users.\n"
-            f"Upgrade to premium for unlimited bombing!\n"
-            f"Use '💎 Upgrade to Premium' in main menu."
+            f"Upgrade to premium for unlimited bombing!"
         )
         return
 
@@ -393,7 +368,6 @@ async def start_bombing(update, context, query=None):
     phone = context.user_data["phone"]
     duration_sec = context.user_data["duration_seconds"]
     premium = db.is_premium(user_id)
-    # Check cooldown again (just in case)
     if not db.can_start_bomb(user_id, premium):
         msg = "❌ Daily limit reached. Upgrade to premium for unlimited bombing."
         if query:
@@ -402,7 +376,6 @@ async def start_bombing(update, context, query=None):
             await update.message.reply_text(msg)
         return
 
-    # Log to channel
     if LOG_CHANNEL_ID:
         await context.bot.send_message(
             LOG_CHANNEL_ID,
@@ -410,7 +383,6 @@ async def start_bombing(update, context, query=None):
             parse_mode="Markdown"
         )
 
-    # Call start API
     start_result = await call_start_api(phone)
     start_text = format_json_human(start_result)
     msg = f"🔥 *Bombing Started!*\n\n{start_text}\n\nWill run for {duration_sec} seconds.\nUse /stop to cancel." + BRANDING
@@ -419,28 +391,20 @@ async def start_bombing(update, context, query=None):
     else:
         await update.message.reply_text(msg, parse_mode="Markdown")
 
-    # Apply referral bonus if any
     ref_bonus = db.get_referral_stats(user_id) * REFERRAL_BONUS_CYCLES
     if ref_bonus > 0:
         await context.bot.send_message(user_id, f"🎉 You have {ref_bonus} bonus cycles from referrals! They will be added to your session.")
-        # We'll add bonus cycles to the current session (increase total cycles by ref_bonus)
-        # We'll pass it to bombing loop
         context.user_data["bonus_cycles"] = ref_bonus
-        # Reset referral bonus after using (or we can let it accumulate; for simplicity we'll use it once)
-        # Optionally, we could mark that we used it. But for now, we'll just send message.
 
-    # Update stats and increment bomb count
-    db.update_stats(user_id, 0)  # cycles will be added later
+    db.update_stats(user_id, 0)
     db.increment_bomb_count(user_id)
 
-    # Start bombing loop
     task = asyncio.create_task(bombing_loop(user_id, phone, duration_sec, context))
     active_bombs[user_id] = task
 
 async def bombing_loop(user_id, phone, duration_sec, context):
     end_time = datetime.now() + timedelta(seconds=duration_sec)
     iteration = 0
-    # Bonus cycles from referrals
     bonus = context.user_data.get("bonus_cycles", 0)
     total_cycles = 0
     try:
@@ -453,22 +417,19 @@ async def bombing_loop(user_id, phone, duration_sec, context):
             text = f"📡 *Cycle #{iteration}*\n\n{format_json_human(result)}" + BRANDING
             await context.bot.send_message(user_id, text, parse_mode="Markdown")
             total_cycles += 1
-        # Add bonus cycles (extra messages) after loop
         if bonus > 0:
             for i in range(bonus):
                 result = await call_single_api(phone)
                 text = f"🎁 *Bonus Cycle #{i+1} from referral*\n\n{format_json_human(result)}" + BRANDING
                 await context.bot.send_message(user_id, text, parse_mode="Markdown")
                 total_cycles += 1
-                await asyncio.sleep(1)  # small delay
-
+                await asyncio.sleep(1)
         stop_result = await call_stop_api(phone)
         await context.bot.send_message(
             user_id,
             f"🛑 *Bombing Stopped (duration ended)*\n\n{format_json_human(stop_result)}" + BRANDING,
             parse_mode="Markdown"
         )
-        # Update total cycles in stats
         db.update_stats(user_id, total_cycles)
     except asyncio.CancelledError:
         stop_result = await call_stop_api(phone)
@@ -482,7 +443,15 @@ async def bombing_loop(user_id, phone, duration_sec, context):
         if user_id in active_bombs:
             del active_bombs[user_id]
 
-# ---------- Scheduled Bombing ----------
+async def stop(update, context):
+    user_id = update.effective_user.id
+    if user_id in active_bombs:
+        active_bombs[user_id].cancel()
+        await update.message.reply_text("🛑 Stopping bombing...")
+    else:
+        await update.message.reply_text("No active bombing session.")
+
+# ---------- SCHEDULED BOMB (Simplified, one state) ----------
 async def schedule_bomb_start(update, context):
     query = update.callback_query
     await query.answer()
@@ -494,122 +463,176 @@ async def schedule_bomb_start(update, context):
         await query.edit_message_text("⚠️ You already have an active bombing session. Use /stop first.")
         return
 
-    # Cooldown check for free users (schedule counts as a bomb)
     premium = db.is_premium(user_id)
     if not db.can_start_bomb(user_id, premium):
         await query.edit_message_text(
             f"❌ You have reached your daily limit ({FREE_DAILY_LIMIT} bombs) for free users.\n"
-            f"Upgrade to premium for unlimited bombing!\n"
-            f"Use '💎 Upgrade to Premium' in main menu."
+            f"Upgrade to premium for unlimited bombing!"
         )
         return
 
+    context.user_data["sched_step"] = "phone"
     await query.edit_message_text("📞 Send me the *10-digit phone number* (only digits).\nType /cancel to abort.",
                                   parse_mode="Markdown")
-    return SCHEDULE_DATE
+    return SCHEDULE_STATE
 
-async def schedule_get_phone(update, context):
-    phone = update.message.text.strip()
-    if not phone.isdigit() or len(phone) != 10:
-        await update.message.reply_text("❌ Invalid number. Please enter exactly 10 digits.")
-        return SCHEDULE_DATE
-    context.user_data["sched_phone"] = phone
-    await update.message.reply_text("📅 Send the *date* in YYYY-MM-DD format (e.g., 2025-04-01):")
-    return SCHEDULE_TIME
+async def schedule_handler(update, context):
+    step = context.user_data.get("sched_step")
+    if step == "phone":
+        phone = update.message.text.strip()
+        if not phone.isdigit() or len(phone) != 10:
+            await update.message.reply_text("❌ Invalid number. Please enter exactly 10 digits.")
+            return SCHEDULE_STATE
+        context.user_data["sched_phone"] = phone
+        context.user_data["sched_step"] = "date"
+        await update.message.reply_text("📅 Send the *date* in YYYY-MM-DD format (e.g., 2025-04-01):")
+        return SCHEDULE_STATE
+    elif step == "date":
+        try:
+            date_str = update.message.text.strip()
+            scheduled_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if scheduled_date < datetime.now().date():
+                await update.message.reply_text("❌ Date must be in the future.")
+                return SCHEDULE_STATE
+            context.user_data["sched_date"] = scheduled_date
+            context.user_data["sched_step"] = "time"
+            await update.message.reply_text("⏰ Send the *time* in HH:MM (24-hour format, e.g., 14:30):")
+            return SCHEDULE_STATE
+        except ValueError:
+            await update.message.reply_text("❌ Invalid date format. Use YYYY-MM-DD.")
+            return SCHEDULE_STATE
+    elif step == "time":
+        try:
+            time_str = update.message.text.strip()
+            hour, minute = map(int, time_str.split(':'))
+            scheduled_datetime = datetime.combine(
+                context.user_data["sched_date"],
+                datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M").time()
+            )
+            if scheduled_datetime <= datetime.now():
+                await update.message.reply_text("❌ The scheduled time must be in the future.")
+                return SCHEDULE_STATE
+            context.user_data["sched_datetime"] = scheduled_datetime
+            # Ask for duration via inline keyboard
+            keyboard = [
+                [InlineKeyboardButton("30 seconds", callback_data="sched_dur_30"),
+                 InlineKeyboardButton("1 minute", callback_data="sched_dur_60")],
+                [InlineKeyboardButton("5 minutes", callback_data="sched_dur_300"),
+                 InlineKeyboardButton("10 minutes", callback_data="sched_dur_600")],
+                [InlineKeyboardButton("30 minutes", callback_data="sched_dur_1800"),
+                 InlineKeyboardButton("1 hour", callback_data="sched_dur_3600")],
+                [InlineKeyboardButton("2 hours", callback_data="sched_dur_7200"),
+                 InlineKeyboardButton("Custom", callback_data="sched_dur_custom")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
+            ]
+            await update.message.reply_text(
+                "⏱️ Choose duration:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            context.user_data["sched_step"] = "duration_wait"
+            return SCHEDULE_STATE
+        except Exception:
+            await update.message.reply_text("❌ Invalid time format. Use HH:MM (e.g., 14:30).")
+            return SCHEDULE_STATE
+    elif step == "duration_wait":
+        await update.message.reply_text("Please choose a duration using the buttons below.")
+        return SCHEDULE_STATE
+    else:
+        await update.message.reply_text("Error: restart scheduling with /schedule.")
+        return ConversationHandler.END
 
-async def schedule_get_date(update, context):
-    try:
-        date_str = update.message.text.strip()
-        scheduled_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        if scheduled_date < datetime.now().date():
-            await update.message.reply_text("❌ Date must be in the future.")
-            return SCHEDULE_TIME
-        context.user_data["sched_date"] = scheduled_date
-        await update.message.reply_text("⏰ Send the *time* in HH:MM (24-hour format, e.g., 14:30):")
-        return SCHEDULE_DATE  # wait for time
-    except ValueError:
-        await update.message.reply_text("❌ Invalid date format. Use YYYY-MM-DD.")
-        return SCHEDULE_TIME
-
-async def schedule_get_time(update, context):
-    try:
-        time_str = update.message.text.strip()
-        hour, minute = map(int, time_str.split(':'))
-        scheduled_time = datetime.combine(context.user_data["sched_date"], datetime.time(datetime(1,1,1, hour, minute)))
-        if scheduled_time <= datetime.now():
-            await update.message.reply_text("❌ The scheduled time must be in the future.")
-            return SCHEDULE_DATE
-        context.user_data["sched_datetime"] = scheduled_time
-        # Ask for duration
-        keyboard = [
-            [InlineKeyboardButton("30 seconds", callback_data="sched_dur_30"),
-             InlineKeyboardButton("1 minute", callback_data="sched_dur_60")],
-            [InlineKeyboardButton("5 minutes", callback_data="sched_dur_300"),
-             InlineKeyboardButton("10 minutes", callback_data="sched_dur_600")],
-            [InlineKeyboardButton("30 minutes", callback_data="sched_dur_1800"),
-             InlineKeyboardButton("1 hour", callback_data="sched_dur_3600")],
-            [InlineKeyboardButton("2 hours", callback_data="sched_dur_7200"),
-             InlineKeyboardButton("Custom", callback_data="sched_dur_custom")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]
-        ]
-        await update.message.reply_text(
-            "⏱️ Choose duration:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return SCHEDULE_DATE  # wait for duration
-    except Exception:
-        await update.message.reply_text("❌ Invalid time format. Use HH:MM (e.g., 14:30).")
-        return SCHEDULE_DATE
-
-async def schedule_duration(update, context):
+async def schedule_duration_callback(update, context):
     query = update.callback_query
+    await query.answer()
     data = query.data
     if data == "cancel":
         await query.edit_message_text("❌ Cancelled.")
         return ConversationHandler.END
     if data == "sched_dur_custom":
         await query.edit_message_text("Enter duration in seconds (e.g., 90 for 1.5 minutes):")
-        return SCHEDULE_DATE  # custom duration input
+        context.user_data["sched_step"] = "duration_custom"
+        return SCHEDULE_STATE
     seconds = int(data.split("_")[2])
     context.user_data["sched_duration"] = seconds
     # Schedule the bomb
     user_id = update.effective_user.id
     phone = context.user_data["sched_phone"]
     scheduled_time = context.user_data["sched_datetime"]
-    # Create a job that will run at scheduled_time
     job = context.application.job_queue.run_once(
         scheduled_bomb_task,
         when=scheduled_time,
-        data={'user_id': user_id, 'phone': phone, 'duration': seconds, 'context': context}
+        data={'user_id': user_id, 'phone': phone, 'duration': seconds}
     )
     context.user_data["sched_job"] = job
-    # Log and confirm
     await query.edit_message_text(
         f"✅ Bomb scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S')}.\n"
         f"Duration: {seconds} seconds.\n"
         f"You will be notified when it starts."
     )
-    # Increment bomb count (since it's a scheduled bomb, we count it as used)
     db.increment_bomb_count(user_id)
     return ConversationHandler.END
 
-async def scheduled_bomb_task(job):
-    data = job.data
-    user_id = data['user_id']
-    phone = data['phone']
-    duration_sec = data['duration']
-    context = data['context']
-    # Start bombing directly
+async def schedule_custom_duration(update, context):
+    try:
+        seconds = int(update.message.text.strip())
+        if seconds <= 0 or seconds > MAX_DURATION_SECONDS:
+            raise ValueError
+        context.user_data["sched_duration"] = seconds
+        user_id = update.effective_user.id
+        phone = context.user_data["sched_phone"]
+        scheduled_time = context.user_data["sched_datetime"]
+        job = context.application.job_queue.run_once(
+            scheduled_bomb_task,
+            when=scheduled_time,
+            data={'user_id': user_id, 'phone': phone, 'duration': seconds}
+        )
+        context.user_data["sched_job"] = job
+        await update.message.reply_text(
+            f"✅ Bomb scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S')}.\n"
+            f"Duration: {seconds} seconds.\n"
+            f"You will be notified when it starts."
+        )
+        db.increment_bomb_count(user_id)
+        return ConversationHandler.END
+    except:
+        await update.message.reply_text("❌ Invalid duration. Must be a number between 1 and 86400.")
+        return SCHEDULE_STATE
+
+async def scheduled_bomb_task(context: ContextTypes.DEFAULT_TYPE):
+    """Job that runs at scheduled time"""
+    job_data = context.job.data
+    user_id = job_data['user_id']
+    phone = job_data['phone']
+    duration_sec = job_data['duration']
     await context.bot.send_message(user_id, f"⏰ Your scheduled bomb is starting now!\nTarget: +91{phone}\nDuration: {duration_sec} seconds")
-    # Call start API
     start_result = await call_start_api(phone)
     start_text = format_json_human(start_result)
     await context.bot.send_message(user_id, f"🔥 *Bombing Started!*\n\n{start_text}\n\nWill run for {duration_sec} seconds.\nUse /stop to cancel." + BRANDING, parse_mode="Markdown")
-    # Run bombing loop
-    task = asyncio.create_task(bombing_loop(user_id, phone, duration_sec, context))
+    # Simplified bombing loop for scheduled bomb (using only bot)
+    async def sched_bombing_loop():
+        end_time = datetime.now() + timedelta(seconds=duration_sec)
+        iteration = 0
+        try:
+            while datetime.now() < end_time:
+                iteration += 1
+                await asyncio.sleep(INTERVAL_SECONDS)
+                if datetime.now() >= end_time:
+                    break
+                result = await call_single_api(phone)
+                text = f"📡 *Cycle #{iteration}*\n\n{format_json_human(result)}" + BRANDING
+                await context.bot.send_message(user_id, text, parse_mode="Markdown")
+            stop_result = await call_stop_api(phone)
+            await context.bot.send_message(user_id, f"🛑 *Bombing Stopped (duration ended)*\n\n{format_json_human(stop_result)}" + BRANDING, parse_mode="Markdown")
+        except asyncio.CancelledError:
+            stop_result = await call_stop_api(phone)
+            await context.bot.send_message(user_id, f"🛑 *Bombing Stopped by user*\n\n{format_json_human(stop_result)}" + BRANDING, parse_mode="Markdown")
+        finally:
+            if user_id in active_bombs:
+                del active_bombs[user_id]
+    task = asyncio.create_task(sched_bombing_loop())
     active_bombs[user_id] = task
 
-# ---------- ADMIN PANEL (Extended) ----------
+# ---------- ADMIN PANEL ----------
 async def admin_panel(update, context):
     query = update.callback_query
     await query.answer()
@@ -684,14 +707,60 @@ async def admin_action(update, context):
         return ADMIN_BAN
     elif data == "admin_broadcast":
         context.user_data["admin_action"] = "broadcast"
-        await query.edit_message_text("Send the message to broadcast (text only, or reply to a message with /broadcast for rich content).")
+        await query.edit_message_text("Send the message to broadcast (text only, or reply to a message).")
         return ADMIN_BROADCAST
     elif data == "admin_bulkdm":
         context.user_data["admin_action"] = "bulkdm"
-        await query.edit_message_text("Send the message to bulk DM (text only, or reply to a message with /bulkdm for rich content).")
+        await query.edit_message_text("Send the message to bulk DM (text only, or reply to a message).")
         return ADMIN_BULKDM
     else:
         await admin_panel(update, context)
+        return ConversationHandler.END
+
+async def admin_get_user_id(update, context):
+    action = context.user_data.get("admin_action")
+    try:
+        target_id = int(update.message.text.strip())
+    except:
+        await update.message.reply_text("Invalid user ID.")
+        return ADMIN_BAN
+
+    if action == "admin_ban":
+        db.ban_user(target_id)
+        await update.message.reply_text(f"Banned user {target_id}.")
+        await admin_panel_after_action(update, context)
+        return ConversationHandler.END
+    elif action == "admin_unban":
+        db.unban_user(target_id)
+        await update.message.reply_text(f"Unbanned user {target_id}.")
+        await admin_panel_after_action(update, context)
+        return ConversationHandler.END
+    elif action == "admin_delete":
+        conn = sqlite3.connect(db.DB_FILE)
+        c = conn.cursor()
+        c.execute("DELETE FROM users WHERE user_id = ?", (target_id,))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(f"Deleted user {target_id} from database.")
+        await admin_panel_after_action(update, context)
+        return ConversationHandler.END
+    elif action == "admin_dm":
+        context.user_data["dm_target"] = target_id
+        await update.message.reply_text("Now send the message to DM (you can reply to a message or type text):")
+        return ADMIN_DM_MSG
+    elif action == "addadmin" and update.effective_user.id == OWNER_ID:
+        db.add_admin(target_id)
+        await update.message.reply_text(f"Added admin {target_id}.")
+        await admin_panel_after_action(update, context)
+        return ConversationHandler.END
+    elif action == "removeadmin" and update.effective_user.id == OWNER_ID:
+        db.remove_admin(target_id)
+        await update.message.reply_text(f"Removed admin {target_id}.")
+        await admin_panel_after_action(update, context)
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("Unknown action.")
+        await admin_panel_after_action(update, context)
         return ConversationHandler.END
 
 async def admin_premium_user(update, context):
@@ -733,10 +802,9 @@ async def admin_premium_user(update, context):
 async def admin_premium_days(update, context):
     try:
         days = int(update.message.text.strip())
-        target = context.user_data["premium_target"]
         if days <= 0:
             raise ValueError
-        # Extend premium (if user has premium, extend; else create)
+        target = context.user_data["premium_target"]
         if db.is_premium(target):
             db.extend_premium(target, days)
         else:
@@ -747,220 +815,6 @@ async def admin_premium_days(update, context):
     except:
         await update.message.reply_text("Invalid number of days.")
         return ADMIN_PREMIUM_DAYS
-
-# ---------- General Callback Handler ----------
-async def callback_handler(update, context):
-    query = update.callback_query
-    data = query.data
-    user_id = query.from_user.id
-
-    if db.is_banned(user_id) and data not in ["check_join"]:
-        await query.answer("You are banned.", show_alert=True)
-        return
-
-    if data == "check_join":
-        if await check_force_join(user_id, context):
-            await query.edit_message_text("✅ You have joined all channels! Click /start to continue.")
-        else:
-            await query.answer("You haven't joined all channels yet.", show_alert=True)
-        return
-
-    if data == "back_main":
-        await show_main_menu(update, context, edit=True)
-        return
-
-    if data == "bomber":
-        await bomber_start(update, context)
-        return
-    if data == "schedule_bomb":
-        await schedule_bomb_start(update, context)
-        return
-    if data == "profile":
-        await profile(update, context)
-        return
-    if data == "referrals":
-        await referrals(update, context)
-        return
-    if data == "premium_plans":
-        await premium_plans(update, context)
-        return
-    if data.startswith("premium_") and data != "premium_plans":
-        await handle_premium_selection(update, context)
-        return
-    if data == "info":
-        await info(update, context)
-        return
-    if data == "help":
-        await help_command(update, context)
-        return
-    if data == "admin_panel":
-        await admin_panel(update, context)
-        return
-
-    # If none matched, maybe admin action? But they have separate conversation.
-    # Default: just ignore.
-    await query.answer("Invalid action", show_alert=False)
-
-# ---------- Standard Info/Help ----------
-async def info(update, context):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "🔥 *Ultimate SMS Bomber (Simulation)*\n"
-        "This bot demonstrates a fake bomber for entertainment.\n"
-        "No real SMS are ever sent.\n"
-        "Use 'Bomber' to start.\n\n"
-        "⚠️ For educational/entertainment only." + BRANDING,
-        parse_mode="Markdown"
-    )
-
-async def help_command(update, context):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "📖 *Help*\n"
-        "1. Click 'Bomber' and enter a 10-digit phone number.\n"
-        "2. Choose duration.\n"
-        "3. Bot simulates bombing every 30 seconds until duration ends.\n"
-        "4. Use 'Stop' button to cancel.\n\n"
-        "Premium features:\n"
-        "• Unlimited bombing (no daily limit)\n"
-        "• Schedule bombs for future\n"
-        "• Longer durations\n\n"
-        "Admin panel has all management tools." + BRANDING,
-        parse_mode="Markdown"
-    )
-
-# ---------- Scheduled Backup ----------
-async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
-    """Send daily backup to owner."""
-    try:
-        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        shutil.copy2(db.DB_FILE, backup_name)
-        with open(backup_name, 'rb') as f:
-            await context.bot.send_document(OWNER_ID, f, caption=f"📀 Daily backup {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        os.remove(backup_name)
-    except Exception as e:
-        await context.bot.send_message(OWNER_ID, f"Daily backup failed: {e}")
-
-# ---------- MAIN ----------
-def main():
-    db.init_db()
-    app = Application.builder().token(TOKEN).build()
-
-    # Bomber conversation
-    bomber_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(bomber_start, pattern="^bomber$")],
-        states={
-            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-            DURATION: [
-                CallbackQueryHandler(duration_selected, pattern="^dur_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, custom_duration)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
-        per_message=False
-    )
-    app.add_handler(bomber_conv)
-
-    # Scheduled bombing conversation
-    sched_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(schedule_bomb_start, pattern="^schedule_bomb$")],
-        states={
-            SCHEDULE_DATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_get_phone),
-                CallbackQueryHandler(schedule_duration, pattern="^sched_dur_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_get_date),
-            ],
-            SCHEDULE_TIME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_get_time),
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
-        per_message=False
-    )
-    app.add_handler(sched_conv)
-
-    # Admin conversations
-    admin_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_action, pattern="^admin_")],
-        states={
-            ADMIN_BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_get_user_id)],
-            ADMIN_DM_MSG: [MessageHandler(filters.ALL, admin_get_dm_message)],
-            ADMIN_BROADCAST: [MessageHandler(filters.ALL, admin_broadcast_message)],
-            ADMIN_BULKDM: [MessageHandler(filters.ALL, admin_bulkdm_message)],
-            ADMIN_PREMIUM_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_premium_user)],
-            ADMIN_PREMIUM_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_premium_days)],
-        },
-        fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
-        per_message=False
-    )
-    app.add_handler(admin_conv)
-
-    # Regular commands
-    app.add_handler(CommandHandler("start", handle_referral))  # handles referral and then start
-    app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CommandHandler("confirm_payment", confirm_payment))
-
-    # General callback handler
-    app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!admin_|bomber$|dur_|sched_dur_|premium_).*"))
-
-    # Scheduled backup
-    if app.job_queue:
-        app.job_queue.run_daily(scheduled_backup, time=datetime.strptime("00:00", "%H:%M").time())
-        print("Scheduled backup enabled (daily at 00:00 UTC).")
-    else:
-        print("Warning: JobQueue not available. Scheduled backup disabled.")
-
-    print("Bot started...")
-    app.run_polling()
-
-# Helper functions needed for admin conversation (unchanged)
-async def admin_get_user_id(update, context):
-    action = context.user_data.get("admin_action")
-    try:
-        target_id = int(update.message.text.strip())
-    except:
-        await update.message.reply_text("Invalid user ID. Please send a numeric ID.")
-        return ADMIN_BAN
-
-    if action == "admin_ban":
-        db.ban_user(target_id)
-        await update.message.reply_text(f"Banned user {target_id}.")
-        await admin_panel_after_action(update, context)
-        return ConversationHandler.END
-    elif action == "admin_unban":
-        db.unban_user(target_id)
-        await update.message.reply_text(f"Unbanned user {target_id}.")
-        await admin_panel_after_action(update, context)
-        return ConversationHandler.END
-    elif action == "admin_delete":
-        conn = sqlite3.connect(db.DB_FILE)
-        c = conn.cursor()
-        c.execute("DELETE FROM users WHERE user_id = ?", (target_id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"Deleted user {target_id} from database.")
-        await admin_panel_after_action(update, context)
-        return ConversationHandler.END
-    elif action == "admin_dm":
-        context.user_data["dm_target"] = target_id
-        await update.message.reply_text("Now send the message to DM (you can reply to a message or type text):")
-        return ADMIN_DM_MSG
-    elif action == "addadmin" and update.effective_user.id == OWNER_ID:
-        db.add_admin(target_id)
-        await update.message.reply_text(f"Added admin {target_id}.")
-        await admin_panel_after_action(update, context)
-        return ConversationHandler.END
-    elif action == "removeadmin" and update.effective_user.id == OWNER_ID:
-        db.remove_admin(target_id)
-        await update.message.reply_text(f"Removed admin {target_id}.")
-        await admin_panel_after_action(update, context)
-        return ConversationHandler.END
-    else:
-        await update.message.reply_text("Unknown action.")
-        await admin_panel_after_action(update, context)
-        return ConversationHandler.END
 
 async def admin_get_dm_message(update, context):
     target = context.user_data.get("dm_target")
@@ -1021,13 +875,165 @@ async def admin_panel_after_action(update, context):
     keyboard = [[InlineKeyboardButton("🔙 Back to Admin Panel", callback_data="admin_panel")]]
     await update.message.reply_text("Action completed.", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def stop(update, context):
-    user_id = update.effective_user.id
-    if user_id in active_bombs:
-        active_bombs[user_id].cancel()
-        await update.message.reply_text("🛑 Stopping bombing...")
+# ---------- General Callback Handler ----------
+async def callback_handler(update, context):
+    query = update.callback_query
+    data = query.data
+    user_id = query.from_user.id
+
+    if db.is_banned(user_id) and data not in ["check_join"]:
+        await query.answer("You are banned.", show_alert=True)
+        return
+
+    if data == "check_join":
+        if await check_force_join(user_id, context):
+            await query.edit_message_text("✅ You have joined all channels! Click /start to continue.")
+        else:
+            await query.answer("You haven't joined all channels yet.", show_alert=True)
+        return
+
+    if data == "back_main":
+        await show_main_menu(update, context, edit=True)
+        return
+
+    if data == "bomber":
+        await bomber_start(update, context)
+        return
+    if data == "schedule_bomb":
+        await schedule_bomb_start(update, context)
+        return
+    if data == "profile":
+        await profile(update, context)
+        return
+    if data == "referrals":
+        await referrals(update, context)
+        return
+    if data == "premium_plans":
+        await premium_plans(update, context)
+        return
+    if data.startswith("premium_") and data != "premium_plans":
+        await handle_premium_selection(update, context)
+        return
+    if data == "info":
+        await info(update, context)
+        return
+    if data == "help":
+        await help_command(update, context)
+        return
+    if data == "admin_panel":
+        await admin_panel(update, context)
+        return
+
+    await query.answer("Invalid action", show_alert=False)
+
+async def info(update, context):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🔥 *Ultimate SMS Bomber (Simulation)*\n"
+        "This bot demonstrates a fake bomber for entertainment.\n"
+        "No real SMS are ever sent.\n"
+        "Use 'Bomber' to start.\n\n"
+        "⚠️ For educational/entertainment only." + BRANDING,
+        parse_mode="Markdown"
+    )
+
+async def help_command(update, context):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "📖 *Help*\n"
+        "1. Click 'Bomber' and enter a 10-digit phone number.\n"
+        "2. Choose duration.\n"
+        "3. Bot simulates bombing every 30 seconds until duration ends.\n"
+        "4. Use 'Stop' button to cancel.\n\n"
+        "Premium features:\n"
+        "• Unlimited bombing (no daily limit)\n"
+        "• Schedule bombs for future\n"
+        "• Longer durations\n\n"
+        "Admin panel has all management tools." + BRANDING,
+        parse_mode="Markdown"
+    )
+
+# ---------- Scheduled Backup ----------
+async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        shutil.copy2(db.DB_FILE, backup_name)
+        with open(backup_name, 'rb') as f:
+            await context.bot.send_document(OWNER_ID, f, caption=f"📀 Daily backup {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        os.remove(backup_name)
+    except Exception as e:
+        await context.bot.send_message(OWNER_ID, f"Daily backup failed: {e}")
+
+# ---------- MAIN ----------
+def main():
+    db.init_db()
+    app = Application.builder().token(TOKEN).build()
+
+    # Bomber conversation
+    bomber_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(bomber_start, pattern="^bomber$")],
+        states={
+            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
+            DURATION: [
+                CallbackQueryHandler(duration_selected, pattern="^dur_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, custom_duration)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
+        per_message=False
+    )
+    app.add_handler(bomber_conv)
+
+    # Scheduled bomb conversation (single state)
+    sched_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(schedule_bomb_start, pattern="^schedule_bomb$")],
+        states={
+            SCHEDULE_STATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_handler),
+                CallbackQueryHandler(schedule_duration_callback, pattern="^sched_dur_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, schedule_custom_duration),
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
+        per_message=False
+    )
+    app.add_handler(sched_conv)
+
+    # Admin conversation
+    admin_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_action, pattern="^admin_")],
+        states={
+            ADMIN_BAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_get_user_id)],
+            ADMIN_DM_MSG: [MessageHandler(filters.ALL, admin_get_dm_message)],
+            ADMIN_BROADCAST: [MessageHandler(filters.ALL, admin_broadcast_message)],
+            ADMIN_BULKDM: [MessageHandler(filters.ALL, admin_bulkdm_message)],
+            ADMIN_PREMIUM_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_premium_user)],
+            ADMIN_PREMIUM_DAYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_premium_days)],
+        },
+        fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
+        per_message=False
+    )
+    app.add_handler(admin_conv)
+
+    # Regular commands
+    app.add_handler(CommandHandler("start", handle_referral))
+    app.add_handler(CommandHandler("stop", stop))
+    app.add_handler(CommandHandler("confirm_payment", confirm_payment))
+
+    # General callback handler (all other inline buttons)
+    app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!admin_|bomber$|schedule_bomb$|dur_|sched_dur_|premium_).*"))
+
+    # Scheduled backup
+    if app.job_queue:
+        app.job_queue.run_daily(scheduled_backup, time=datetime.strptime("00:00", "%H:%M").time())
+        print("Scheduled backup enabled (daily at 00:00 UTC).")
     else:
-        await update.message.reply_text("No active bombing session.")
+        print("Warning: JobQueue not available. Scheduled backup disabled.")
+
+    print("Bot started...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
