@@ -17,7 +17,7 @@ import database as db
 # ========== CONFIGURATION (All in one place) ==========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 OWNER_ID = 8104850843
-LOG_CHANNEL_ID = -10036720099488  # private log channel
+LOG_CHANNEL_ID = -1003663672738  # private log channel
 
 # Forced channels
 FORCED_CHANNELS = [
