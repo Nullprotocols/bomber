@@ -11,6 +11,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, ConversationHandler,
     MessageHandler, filters, ContextTypes
 )
+from aiohttp import web
 
 import database as db
 
@@ -451,7 +452,7 @@ async def stop(update, context):
     else:
         await update.message.reply_text("No active bombing session.")
 
-# ---------- SCHEDULED BOMB (Simplified, one state) ----------
+# ---------- SCHEDULED BOMB (Simplified) ----------
 async def schedule_bomb_start(update, context):
     query = update.callback_query
     await query.answer()
@@ -966,9 +967,25 @@ async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await context.bot.send_message(OWNER_ID, f"Daily backup failed: {e}")
 
+# ---------- HTTP Health Check Server ----------
+async def health_check_handler(request):
+    return web.Response(text="OK")
+
+async def start_http_server():
+    app_http = web.Application()
+    app_http.router.add_get('/', health_check_handler)
+    runner = web.AppRunner(app_http)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Health check server running on port {port}")
+
 # ---------- MAIN ----------
-def main():
+async def run_bot():
+    # Initialize database
     db.init_db()
+    # Build application
     app = Application.builder().token(TOKEN).build()
 
     # Bomber conversation
@@ -986,7 +1003,7 @@ def main():
     )
     app.add_handler(bomber_conv)
 
-    # Scheduled bomb conversation (single state)
+    # Scheduled bomb conversation
     sched_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(schedule_bomb_start, pattern="^schedule_bomb$")],
         states={
@@ -1022,7 +1039,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("confirm_payment", confirm_payment))
 
-    # General callback handler (all other inline buttons)
+    # General callback handler
     app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!admin_|bomber$|schedule_bomb$|dur_|sched_dur_|premium_).*"))
 
     # Scheduled backup
@@ -1032,8 +1049,21 @@ def main():
     else:
         print("Warning: JobQueue not available. Scheduled backup disabled.")
 
+    # Start polling
     print("Bot started...")
-    app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    return app
+
+# ---------- MAIN ENTRY POINT ----------
+async def main():
+    # Start HTTP health check server
+    await start_http_server()
+    # Start bot
+    await run_bot()
+    # Keep running
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
