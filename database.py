@@ -7,7 +7,6 @@ DB_FILE = "bot.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Users
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -26,7 +25,6 @@ def init_db():
             user_id INTEGER PRIMARY KEY
         )
     """)
-    # Premium & referral
     c.execute("""
         CREATE TABLE IF NOT EXISTS premium (
             user_id INTEGER PRIMARY KEY,
@@ -43,7 +41,6 @@ def init_db():
             PRIMARY KEY (referrer_id, referred_id)
         )
     """)
-    # Stats
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_stats (
             user_id INTEGER PRIMARY KEY,
@@ -51,7 +48,6 @@ def init_db():
             total_cycles INTEGER DEFAULT 0
         )
     """)
-    # Cooldown
     c.execute("""
         CREATE TABLE IF NOT EXISTS cooldown (
             user_id INTEGER PRIMARY KEY,
