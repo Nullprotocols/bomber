@@ -541,7 +541,7 @@ def main():
             ],
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
-        per_message=False  # To avoid warning
+        per_message=False
     )
     app.add_handler(bomber_conv)
 
@@ -555,7 +555,7 @@ def main():
             ADMIN_BULKDM: [MessageHandler(filters.ALL, admin_bulkdm_message)],
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
-        per_message=False  # To avoid warning
+        per_message=False
     )
     app.add_handler(admin_conv)
 
@@ -563,15 +563,15 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stop", stop))
 
-    # General callback handler (for non-conversation callbacks)
+    # General callback handler
     app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!admin_|bomber$|dur_|cancel$).*"))
 
-    # Scheduled backup every 24 hours (if job queue is available)
+    # Scheduled backup every day at 00:00 UTC (if job queue is available)
     if app.job_queue:
-        app.job_queue.run_daily(scheduled_backup, time=datetime.strptime("00:00", "%H:%M").time(), days=1)
+        app.job_queue.run_daily(scheduled_backup, time=datetime.strptime("00:00", "%H:%M").time())
         print("Scheduled backup enabled (daily at 00:00 UTC).")
     else:
-        print("Warning: JobQueue not available. Scheduled backup disabled. Ensure 'python-telegram-bot[job-queue]' is installed.")
+        print("Warning: JobQueue not available. Scheduled backup disabled.")
 
     print("Bot started...")
     app.run_polling()
