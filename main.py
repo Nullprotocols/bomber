@@ -17,7 +17,7 @@ import database as db
 # ========== CONFIGURATION (All in one place) ==========
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN")
 OWNER_ID = 8104850843
-LOG_CHANNEL_ID = -1003663672738  # private log channel
+LOG_CHANNEL_ID = -10036720099488  # private log channel
 
 # Forced channels
 FORCED_CHANNELS = [
@@ -541,6 +541,7 @@ def main():
             ],
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
+        per_message=False  # To avoid warning
     )
     app.add_handler(bomber_conv)
 
@@ -554,6 +555,7 @@ def main():
             ADMIN_BULKDM: [MessageHandler(filters.ALL, admin_bulkdm_message)],
         },
         fallbacks=[CommandHandler("cancel", lambda u,c: u.message.reply_text("Cancelled."))],
+        per_message=False  # To avoid warning
     )
     app.add_handler(admin_conv)
 
@@ -564,8 +566,12 @@ def main():
     # General callback handler (for non-conversation callbacks)
     app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(?!admin_|bomber$|dur_|cancel$).*"))
 
-    # Scheduled backup every 24 hours (86400 seconds)
-    app.job_queue.run_daily(scheduled_backup, time=datetime.strptime("00:00", "%H:%M").time(), days=1)
+    # Scheduled backup every 24 hours (if job queue is available)
+    if app.job_queue:
+        app.job_queue.run_daily(scheduled_backup, time=datetime.strptime("00:00", "%H:%M").time(), days=1)
+        print("Scheduled backup enabled (daily at 00:00 UTC).")
+    else:
+        print("Warning: JobQueue not available. Scheduled backup disabled. Ensure 'python-telegram-bot[job-queue]' is installed.")
 
     print("Bot started...")
     app.run_polling()
