@@ -1,12 +1,13 @@
 import sqlite3
 from datetime import datetime, timedelta
+import base64
 
 DB_FILE = "bot.db"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Existing tables
+    # Users
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -25,7 +26,7 @@ def init_db():
             user_id INTEGER PRIMARY KEY
         )
     """)
-    # New tables for pro version
+    # Premium & referral
     c.execute("""
         CREATE TABLE IF NOT EXISTS premium (
             user_id INTEGER PRIMARY KEY,
@@ -42,6 +43,7 @@ def init_db():
             PRIMARY KEY (referrer_id, referred_id)
         )
     """)
+    # Stats
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_stats (
             user_id INTEGER PRIMARY KEY,
@@ -49,6 +51,7 @@ def init_db():
             total_cycles INTEGER DEFAULT 0
         )
     """)
+    # Cooldown
     c.execute("""
         CREATE TABLE IF NOT EXISTS cooldown (
             user_id INTEGER PRIMARY KEY,
@@ -130,9 +133,8 @@ def get_admins():
     conn.close()
     return admins
 
-# ---------- Premium functions ----------
+# ---------- Premium & referral ----------
 def generate_referral_code(user_id):
-    import base64
     code = base64.urlsafe_b64encode(str(user_id).encode()).decode().rstrip('=')
     return code
 
@@ -142,8 +144,10 @@ def create_premium(user_id, days=30, referral_code=None):
         referral_code = generate_referral_code(user_id)
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO premium (user_id, expiry_date, referral_code, referral_count) VALUES (?, ?, ?, COALESCE((SELECT referral_count FROM premium WHERE user_id=?), 0))",
-              (user_id, expiry, referral_code, user_id))
+    c.execute("""
+        INSERT OR REPLACE INTO premium (user_id, expiry_date, referral_code, referral_count)
+        VALUES (?, ?, ?, COALESCE((SELECT referral_count FROM premium WHERE user_id=?), 0))
+    """, (user_id, expiry, referral_code, user_id))
     conn.commit()
     conn.close()
 
@@ -200,15 +204,12 @@ def get_referral_code(user_id):
 def add_referral(referrer_id, referred_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Check if already referred
     c.execute("SELECT 1 FROM referrals WHERE referrer_id=? AND referred_id=?", (referrer_id, referred_id))
     if c.fetchone():
         conn.close()
         return False
-    # Add referral record
     c.execute("INSERT INTO referrals (referrer_id, referred_id, date) VALUES (?, ?, ?)",
               (referrer_id, referred_id, datetime.now().isoformat()))
-    # Increment referrer's referral count
     c.execute("UPDATE premium SET referral_count = referral_count + 1 WHERE user_id = ?", (referrer_id,))
     conn.commit()
     conn.close()
@@ -222,13 +223,17 @@ def get_referral_stats(user_id):
     conn.close()
     return row[0] if row else 0
 
-# ---------- User Stats ----------
+# ---------- User stats ----------
 def update_stats(user_id, cycles):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT INTO user_stats (user_id, total_bombs, total_cycles) VALUES (?, 1, ?) "
-              "ON CONFLICT(user_id) DO UPDATE SET total_bombs = total_bombs + 1, total_cycles = total_cycles + ?",
-              (user_id, cycles, cycles))
+    c.execute("""
+        INSERT INTO user_stats (user_id, total_bombs, total_cycles)
+        VALUES (?, 1, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            total_bombs = total_bombs + 1,
+            total_cycles = total_cycles + ?
+    """, (user_id, cycles, cycles))
     conn.commit()
     conn.close()
 
@@ -256,12 +261,11 @@ def can_start_bomb(user_id, is_premium):
         return True
     last_date = row[1] if row[1] else ""
     if last_date != today:
-        # Reset counter
         c.execute("UPDATE cooldown SET bomb_count_today = 0, last_bomb_date = ? WHERE user_id = ?", (today, user_id))
         conn.commit()
         conn.close()
         return True
-    if row[0] >= 3:  # 3 bombs per day for free users
+    if row[0] >= 3:   # free users limit 3 bombs per day
         conn.close()
         return False
     conn.close()
@@ -271,8 +275,12 @@ def increment_bomb_count(user_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     today = datetime.now().date().isoformat()
-    c.execute("INSERT INTO cooldown (user_id, bomb_count_today, last_bomb_date) VALUES (?, 1, ?) "
-              "ON CONFLICT(user_id) DO UPDATE SET bomb_count_today = bomb_count_today + 1, last_bomb_date = ?",
-              (user_id, today, today))
+    c.execute("""
+        INSERT INTO cooldown (user_id, bomb_count_today, last_bomb_date)
+        VALUES (?, 1, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            bomb_count_today = bomb_count_today + 1,
+            last_bomb_date = ?
+    """, (user_id, today, today))
     conn.commit()
     conn.close()
