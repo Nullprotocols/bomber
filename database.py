@@ -1,116 +1,173 @@
 import sqlite3
+import os
+from typing import List, Optional, Dict, Any
 
-DB_FILE = "bot.db"
+DB_FILE = "bot_data.db"
+
+def get_connection():
+    """Return a database connection with row factory."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    """Create tables if they don't exist"""
-    conn = sqlite3.connect(DB_FILE)
+    """Create users table if not exists."""
+    conn = get_connection()
     c = conn.cursor()
-    c.execute("""
+    c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            first_name TEXT
+            first_name TEXT,
+            role TEXT DEFAULT 'user',
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            banned INTEGER DEFAULT 0,
+            target_number TEXT
         )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS banned_users (
-            user_id INTEGER PRIMARY KEY
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS admins (
-            user_id INTEGER PRIMARY KEY
-        )
-    """)
+    ''')
     conn.commit()
     conn.close()
 
-def add_user(user_id, username, first_name):
-    """Add new user (ignore if already exists)"""
-    conn = sqlite3.connect(DB_FILE)
+def add_user(user_id: int, username: Optional[str], first_name: Optional[str]):
+    """Add a new user to the database if not already present."""
+    conn = get_connection()
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-              (user_id, username, first_name))
+    c.execute('''
+        INSERT OR IGNORE INTO users (user_id, username, first_name)
+        VALUES (?, ?, ?)
+    ''', (user_id, username, first_name))
     conn.commit()
     conn.close()
 
-def is_banned(user_id):
-    """Check if a user is banned"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
-    conn.close()
-    return result is not None
-
-def ban_user(user_id):
-    """Ban a user"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO banned_users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
-    conn.close()
-
-def unban_user(user_id):
-    """Unban a user"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-def delete_user(user_id):
-    """Completely delete a user from all tables"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
-    c.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
-    c.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-def get_all_users():
-    """Return list of all user IDs"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users")
-    users = [row[0] for row in c.fetchall()]
-    conn.close()
-    return users
-
-def is_admin(user_id, owner_id):
-    """Check if user is admin (owner is always admin)"""
-    if user_id == owner_id:
+def is_admin(user_id: int) -> bool:
+    """Check if user is admin (owner or role=admin)."""
+    # First check if this user is the owner
+    owner_id = os.getenv("OWNER_ID")
+    if owner_id and str(user_id) == owner_id:
         return True
-    conn = sqlite3.connect(DB_FILE)
+    # Then check database role
+    conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,))
-    result = c.fetchone()
+    c.execute('SELECT role FROM users WHERE user_id = ?', (user_id,))
+    row = c.fetchone()
     conn.close()
-    return result is not None
+    return row and row['role'] == 'admin'
 
-def add_admin(user_id):
-    """Add a new admin"""
-    conn = sqlite3.connect(DB_FILE)
+def is_owner(user_id: int) -> bool:
+    """Check if user is the bot owner."""
+    owner_id = os.getenv("OWNER_ID")
+    return owner_id and str(user_id) == owner_id
+
+def set_admin_role(user_id: int, make_admin: bool):
+    """Promote or demote user to/from admin."""
+    role = 'admin' if make_admin else 'user'
+    conn = get_connection()
     c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (user_id,))
+    c.execute('UPDATE users SET role = ? WHERE user_id = ?', (role, user_id))
     conn.commit()
     conn.close()
 
-def remove_admin(user_id):
-    """Remove an admin"""
-    conn = sqlite3.connect(DB_FILE)
+def ban_user(user_id: int) -> bool:
+    """Ban a user. Returns True if user existed."""
+    conn = get_connection()
     c = conn.cursor()
-    c.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+    c.execute('UPDATE users SET banned = 1 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    affected = c.rowcount
+    conn.close()
+    return affected > 0
+
+def unban_user(user_id: int) -> bool:
+    """Unban a user. Returns True if user existed and was banned."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('UPDATE users SET banned = 0 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    affected = c.rowcount
+    conn.close()
+    return affected > 0
+
+def delete_user(user_id: int) -> bool:
+    """Delete user from database. Returns True if user existed."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('DELETE FROM users WHERE user_id = ?', (user_id,))
+    conn.commit()
+    affected = c.rowcount
+    conn.close()
+    return affected > 0
+
+def get_user_by_id(user_id: int) -> Optional[Dict]:
+    """Get user record by ID."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def update_user_target(user_id: int, target: Optional[str]):
+    """Store the target phone number for a user."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('UPDATE users SET target_number = ? WHERE user_id = ?', (target, user_id))
     conn.commit()
     conn.close()
 
-def get_admins():
-    """Return list of all admin IDs"""
-    conn = sqlite3.connect(DB_FILE)
+def get_user_target(user_id: int) -> Optional[str]:
+    """Retrieve the stored target phone number for a user."""
+    conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT user_id FROM admins")
-    admins = [row[0] for row in c.fetchall()]
+    c.execute('SELECT target_number FROM users WHERE user_id = ?', (user_id,))
+    row = c.fetchone()
     conn.close()
-    return admins
+    return row['target_number'] if row else None
+
+def get_all_users_paginated(page: int, per_page: int = 10) -> List[Dict]:
+    """Return a page of users sorted by user_id."""
+    offset = page * per_page
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT user_id, username, first_name, role, joined_at, banned
+        FROM users
+        ORDER BY user_id
+        LIMIT ? OFFSET ?
+    ''', (per_page, offset))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_recent_users_paginated(page: int, per_page: int = 10, days: int = 7) -> List[Dict]:
+    """Return a page of users who joined in the last N days, ordered by join date descending."""
+    offset = page * per_page
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('''
+        SELECT user_id, username, first_name, role, joined_at, banned
+        FROM users
+        WHERE joined_at >= datetime('now', ?)
+        ORDER BY joined_at DESC
+        LIMIT ? OFFSET ?
+    ''', (f'-{days} days', per_page, offset))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_all_user_ids() -> List[int]:
+    """Return list of all user IDs."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM users')
+    rows = c.fetchall()
+    conn.close()
+    return [row['user_id'] for row in rows]
+
+def get_user_count() -> int:
+    """Return total number of users."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM users')
+    count = c.fetchone()[0]
+    conn.close()
+    return count
