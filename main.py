@@ -22,7 +22,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 PORT = int(os.getenv("PORT", 10000))
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")
 if not WEBHOOK_URL:
-    WEBHOOK_URL = "https://bomber-2hra.onrender.com"   # fallback – will be replaced by Render's env
+    WEBHOOK_URL = "https://bomber-2hra.onrender.com"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -31,85 +31,67 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# API Configuration (fake bomber)
+# API Configuration – only API2 (30 sec loop)
 # ------------------------------------------------------------------
-API1_URL = "https://bomber.kingcc.qzz.io/bomb"
-API1_STOP_URL = "https://bomber.kingcc.qzz.io/stop"
-API_KEY = "urfaaan_omdivine"
 API2_URL = "https://bomm.gauravcyber0.workers.dev/"
 
-# active bombing sessions: user_id -> dict with stop_event and tasks
+# active bombing sessions: user_id -> dict with stop_event and task
 active_bombings = {}
 lock = asyncio.Lock()
 
 # ------------------------------------------------------------------
-# Bombing Session Functions
+# Bombing Session Functions (only API2 loop)
 # ------------------------------------------------------------------
-async def api1_loop(phone: str, stop_event: asyncio.Event):
-    """Loop that hits API1 every 2 seconds."""
-    async with aiohttp.ClientSession() as session:
-        while not stop_event.is_set():
-            try:
-                url = f"{API1_URL}?key={API_KEY}&numbar={phone}"
-                async with session.get(url) as resp:
-                    await resp.text()
-                    logger.info(f"API1 hit for {phone}")
-            except Exception as e:
-                logger.error(f"API1 error: {e}")
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                continue
-
 async def api2_loop(phone: str, stop_event: asyncio.Event):
-    """Loop that hits API2 every 30 seconds."""
+    """Loop that hits API2 every 30 seconds until stop_event is set."""
     async with aiohttp.ClientSession() as session:
         while not stop_event.is_set():
             try:
                 url = f"{API2_URL}?phone={phone}"
                 async with session.get(url) as resp:
-                    await resp.text()
-                    logger.info(f"API2 hit for {phone}")
+                    response_text = await resp.text()
+                    logger.info(f"API2 hit for {phone}, status={resp.status}, response={response_text[:200]}")
             except Exception as e:
                 logger.error(f"API2 error: {e}")
+            # Wait 30 seconds, but allow stop_event to wake up early
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=30)
             except asyncio.TimeoutError:
                 continue
 
 async def start_bombing(user_id: int, phone: str):
-    """Start background bombing tasks for a user."""
+    """Start background bombing task for a user."""
+    # Stop any existing session first
+    await stop_bombing(user_id)
+    
     stop_event = asyncio.Event()
-    task1 = asyncio.create_task(api1_loop(phone, stop_event))
-    task2 = asyncio.create_task(api2_loop(phone, stop_event))
+    task = asyncio.create_task(api2_loop(phone, stop_event))
     async with lock:
         active_bombings[user_id] = {
             "stop_event": stop_event,
-            "tasks": [task1, task2],
+            "task": task,
             "phone": phone
         }
     update_user_target(user_id, phone)
 
 async def stop_bombing(user_id: int) -> bool:
-    """Stop all bombing tasks for a user."""
+    """Stop the bombing task for a user. Returns True if was active."""
     async with lock:
         session = active_bombings.pop(user_id, None)
         if not session:
             return False
         session["stop_event"].set()
-        for task in session["tasks"]:
-            task.cancel()
+        session["task"].cancel()
     update_user_target(user_id, None)
     return True
 
 # ------------------------------------------------------------------
-# Admin Decorator
+# Admin Decorators
 # ------------------------------------------------------------------
 def admin_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
         if not is_admin(user_id):
-            # Silently ignore
             return
         return await func(update, context, *args, **kwargs)
     return wrapper
@@ -123,13 +105,9 @@ def owner_only(func):
     return wrapper
 
 # ------------------------------------------------------------------
-# Helper function to send any type of message (text or media)
+# Helper: send any message (text or media)
 # ------------------------------------------------------------------
 async def send_any_message(context, chat_id, update, text=None):
-    """
-    Sends a message to chat_id. If the command was a reply to a message,
-    copies that message. Otherwise sends the provided text.
-    """
     if update.message.reply_to_message:
         try:
             await context.bot.copy_message(
@@ -150,7 +128,7 @@ async def send_any_message(context, chat_id, update, text=None):
     return False
 
 # ------------------------------------------------------------------
-# User Commands (public)
+# Public Commands
 # ------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -169,7 +147,6 @@ async def bomb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(phone) < 10:
         await update.message.reply_text("Invalid number. At least 10 digits.")
         return
-    await stop_bombing(user_id)
     await start_bombing(user_id, phone)
     await update.message.reply_text(f"Bombing started on {phone}. Use /stop to stop.")
 
@@ -189,7 +166,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Menu:\nUse /bomb or /stop")
 
 # ------------------------------------------------------------------
-# Admin Commands (silent if not admin)
+# Admin Commands
 # ------------------------------------------------------------------
 @admin_only
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -235,7 +212,6 @@ async def delete_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast a message (text or media) to all users."""
     text = " ".join(context.args) if context.args else None
     users = get_all_user_ids()
     success = 0
@@ -246,7 +222,6 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """DM a user (text or media). Usage: /dm <user_id> [message] or reply to a message."""
     if len(context.args) < 1:
         await update.message.reply_text("Usage: /dm <user_id> [message] (or reply to a message)")
         return
@@ -257,15 +232,14 @@ async def dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if success:
             await update.message.reply_text(f"Message sent to {target}.")
         else:
-            await update.message.reply_text("Failed to send. Check if user exists and bot can message them.")
+            await update.message.reply_text("Failed to send.")
     except Exception as e:
         await update.message.reply_text(f"Failed: {e}")
 
 @admin_only
 async def bulk_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Bulk DM to multiple users. Usage: /bulkdm id1,id2,... [message] (or reply)"""
     if len(context.args) < 1:
-        await update.message.reply_text("Usage: /bulkdm <id1,id2,...> [message] (or reply to a message)")
+        await update.message.reply_text("Usage: /bulkdm <id1,id2,...> [message] (or reply)")
         return
     ids_str = context.args[0]
     ids = [int(x.strip()) for x in ids_str.split(",") if x.strip().isdigit()]
@@ -472,7 +446,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop))
     app.add_handler(CommandHandler("menu", menu))
 
-    # Admin commands (silent if not admin)
+    # Admin commands
     app.add_handler(CommandHandler("ban", ban))
     app.add_handler(CommandHandler("unban", unban))
     app.add_handler(CommandHandler("deleteuser", delete_user_cmd))
@@ -484,7 +458,7 @@ def main():
     app.add_handler(CommandHandler("lookup", user_lookup))
     app.add_handler(CommandHandler("backup", backup))
 
-    # Owner-only commands
+    # Owner commands
     app.add_handler(CommandHandler("fullbackup", full_backup))
     app.add_handler(CommandHandler("addadmin", add_admin))
     app.add_handler(CommandHandler("removeadmin", remove_admin))
