@@ -1,6 +1,6 @@
 import sqlite3
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict
 
 DB_FILE = "bot_data.db"
 
@@ -22,7 +22,8 @@ def init_db():
             role TEXT DEFAULT 'user',
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             banned INTEGER DEFAULT 0,
-            target_number TEXT
+            target_number TEXT,
+            user_phone TEXT
         )
     ''')
     conn.commit()
@@ -107,7 +108,7 @@ def get_user_by_id(user_id: int) -> Optional[Dict]:
     return dict(row) if row else None
 
 def update_user_target(user_id: int, target: Optional[str]):
-    """Store the target phone number for a user."""
+    """Store the target phone number for a user (used by admin lookup)."""
     conn = get_connection()
     c = conn.cursor()
     c.execute('UPDATE users SET target_number = ? WHERE user_id = ?', (target, user_id))
@@ -122,6 +123,23 @@ def get_user_target(user_id: int) -> Optional[str]:
     row = c.fetchone()
     conn.close()
     return row['target_number'] if row else None
+
+def update_user_phone(user_id: int, phone: str):
+    """Store user's own phone number (protected) for self‑bombing prevention."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('UPDATE users SET user_phone = ? WHERE user_id = ?', (phone, user_id))
+    conn.commit()
+    conn.close()
+
+def get_user_phone(user_id: int) -> Optional[str]:
+    """Retrieve user's own phone number."""
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('SELECT user_phone FROM users WHERE user_id = ?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row['user_phone'] if row else None
 
 def get_all_users_paginated(page: int, per_page: int = 10) -> List[Dict]:
     """Return a page of users sorted by user_id."""
